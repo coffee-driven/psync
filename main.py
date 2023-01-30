@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import logging
 import os
 import time
 
@@ -13,7 +14,8 @@ from multiprocessing import Process, Queue
 SENDER_SCRIPT_PATH = "/tmp/sender.py"
 
 
-class HostConnectionPool:
+class HostConnection:
+    """Connection object"""
     def __init__(self, config: dict) -> None:
         self.host = config['host']
         self.port = int(config['port']) or 22
@@ -34,7 +36,6 @@ class HostConnectionPool:
         transport = self.connection.get_transport()
         transport.atfork()
 
-
     def close_connection(self):
         self.connection.close()
 
@@ -46,30 +47,45 @@ class HostConnectionPool:
         q.put([self.host, out])
         print("Woken up!")
 
+    def find_file_size(self) -> dict:
+        """Find files and their size"""
 
-class RemoteSynchronization:
-    def connect(self, config: dict):
-        print("Creating connection")
-        self.host = config['host']
-        self.port = int(config['port']) or 22
-        self.username = config['username']
-        self.private_key = config['private_key']
-        self.local_storage = config['default_local_storage']
+    def calculate_file_hash(self) -> dict:
+        """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
 
-        if not os.path.exists(self.private_key):
-            print("Private key is inaccessible")
-            exit(2)
 
-        connection = Connection(host=self.host, user=self.username, port=self.port, connect_kwargs={"key_filename": self.private_key})
+class HostConnectionPool():
+    def __init__(self, connection_config: dict, connections: int) -> None:
+        self.conf_cfg = connection_config
+        self.connections = connections
 
-        print("Opening connection")
-        try:
-            connection.open()
-        except Exception as e:
-            print('{}: {}'.format("Couldn't connect via ssh", e))
-            exit(2)
+    def initialize_pool(self):
+        logging.debug("Initializing pool")
+        connection_pool = [HostConnection(self.conf_cfg) for _ in range(0, self.connections, 1)]
+        for c in connection_pool:
+            try:
+                c.open_connection()
+            except Exception as e:
+                print("Connection doesn't work. Removing from list")
+                print(e)
+                connection_pool.remove(c)
 
+        if not connection_pool:
+            logging.error("Connection pool is empty  for host %s", self.conf_cfg["host"])
+            return
+        return connection_pool
+
+
+class RemoteCommands:
+    """
+       Remote command object.
+       Data queue is used for control data - sizes, hashes
+       Management queue is used for siginalization
+    """
+    def __init__(self, connection: HostConnection, data_queue: Queue, management_queue: Queue):
         self.connection = connection
+        self.data_queue = data_queue
+        self.management_queue = management_queue
 
     def check_sender_script(self):
         """Return checksum of script or none"""
@@ -88,8 +104,6 @@ class RemoteSynchronization:
         3. Fill the message bus dict of file ready to download - checksum
         """
 
-        self.connection.run("")
-
     def synchronize(self, files_and_options: dict):
         print('{}: {}'.format(self.host, "Synchronizing files"))
 
@@ -107,8 +121,6 @@ class RemoteSynchronization:
                 print("File not found")
             except PermissionError:
                 print("File is inaccessible")
-
-
 
     def sync_sender_script(self):
         print("Copying remote synchronization script")
@@ -146,18 +158,12 @@ def main():
          }
     ]
 
-    con_list = [HostConnectionPool(config) for _ in range(1, 4, 1)]
-    for c in con_list:
-        try:
-            c.open_connection()
-        except Exception as e:
-            print("Connection doesn't work. Removing from list")
-            print(e)
-            con_list.remove(c)
+    host_connection_pool = HostConnectionPool(connection_config=config, connections=3)
+    connection_pool = host_connection_pool.initialize_pool()
 
     q = Queue()
     prcs = []
-    for host_con in con_list:
+    for host_con in connection_pool:
         p = Process(target=host_con.sleep, args=(q,))
         p.start()
         prcs.append(p)
@@ -166,22 +172,8 @@ def main():
     for i in range(1, 4, 1):
         print(q.get())
 
-
     [x.join() for x in prcs]
 
-    exit()
-    connection_list = []
-    for i in range(1, 4, 1):
-        connector = HostConnectionPool(config)
-        try:
-            con = connector.open_connection()
-        except Exception as e:
-            print("Connection unsuccessful")
-            print(e)
-        else:
-            connection_list.append(con)
-
-    [print(id(x)) for x in connection_list]
     
 
     #remote_sync = RemoteSynchronization()
