@@ -41,9 +41,9 @@ class HostConnectionPool:
     def sleep(self, q):
         print("Sleeping")
         self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
-        sout = self.connection.exec_command("echo cool")
-        print(sout)
-        q.put([sin, sout, serr])
+        sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
+        out = sout.readlines()
+        q.put([self.host, out])
         print("Woken up!")
 
 
@@ -156,11 +156,18 @@ def main():
             con_list.remove(c)
 
     q = Queue()
-    host_con = con_list[0]
-    p = Process(target=host_con.sleep, args=(q,))
-    p.start()
+    prcs = []
+    for host_con in con_list:
+        p = Process(target=host_con.sleep, args=(q,))
+        p.start()
+        prcs.append(p)
 
-    print(q.get())
+    print("getting from queue")
+    for i in range(1, 4, 1):
+        print(q.get())
+
+
+    [x.join() for x in prcs]
 
     exit()
     connection_list = []
