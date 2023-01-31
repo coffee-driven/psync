@@ -8,13 +8,10 @@ import time
 from fabric import Connection
 from paramiko import client
 
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Event
 
 
-SENDER_SCRIPT_PATH = "/tmp/sender.py"
-
-
-class HostConnection:
+class HostConnection():
     """Connection object"""
     def __init__(self, config: dict) -> None:
         self.host = config['host']
@@ -39,19 +36,14 @@ class HostConnection:
     def close_connection(self):
         self.connection.close()
 
-    def sleep(self, q):
+    def sleep(self, q, signal):
         print("Sleeping")
         self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
         sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
         out = sout.readlines()
         q.put([self.host, out])
+        signal.set()
         print("Woken up!")
-
-    def find_file_size(self) -> dict:
-        """Find files and their size"""
-
-    def calculate_file_hash(self) -> dict:
-        """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
 
 
 class HostConnectionPool():
@@ -61,6 +53,7 @@ class HostConnectionPool():
 
     def initialize_pool(self):
         logging.debug("Initializing pool")
+        # TODO: Implement interface
         connection_pool = [HostConnection(self.conf_cfg) for _ in range(0, self.connections, 1)]
         for c in connection_pool:
             try:
@@ -126,6 +119,72 @@ class RemoteCommands:
         print("Copying remote synchronization script")
         pass
 
+    def sleep(self, q):
+        print("Sleeping")
+        self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
+        sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
+        out = sout.readlines()
+        q.put([self.host, out])
+        print("Woken up!")
+
+    def find_file_size(self) -> dict:
+        """Find files and their size"""
+
+    def calculate_file_hash(self) -> dict:
+        """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
+
+
+class Scheduler:
+    """
+        Take files, syncing option and schedule synchronization subprocesses.
+    """
+    def __init__(self, files_and_options: dict, connection_pool: list) -> None:
+        self.files_and_size = files_and_options
+        self.remote_files = {}
+        self.local_files = {}
+
+    def parse_paths(self) -> list:
+        # resolve wildcard and directories
+
+    def get_files_and_sizes(self):
+        # find files, get their size and update data struct
+        self.file_paths = self.parse_paths()
+        # O(nm), using dict in nested for it can be O(n)
+        for file in self.file_paths:
+            # size = connection exec du path
+            for item in self.files_and_size:
+                if item['path'] == str(file):
+                    self.remote_files['path'] = item
+                    self.remote_files['path']['size'] = int(size)
+
+    def get_local_files_and_sizes(self):
+        pass
+
+    def synchronize(self):
+        # sort files, synchronize
+        sorted_files_and_sizes = dict(sorted(files_and_sizes.items(), key=lambda x: x[1]))
+        small_files, medium_files, big_files = group_files_by_size(sorted_files_and_sizes)
+
+        event = Event()
+        queue = Queue()
+        prcs = []
+        for host_con in connection_pool:
+            p = Process(target=host_con.sleep, args=(queue,event))
+            p.start()
+            prcs.append(p)
+
+
+        print("getting from queue")
+        while True:
+            event.wait()
+            print(q.get())
+
+        for i in range(1, 4, 1):
+            print(q.get())
+
+        [x.join() for x in prcs]
+
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -136,8 +195,6 @@ def main():
     parser.add_argument('--private_key', dest='private_key', action='store', help='Private key', required=True) 
 
     args = parser.parse_args()
-
-    curr_sender_script_hash = 'ss33'
 
     config = {
         'host': "127.0.0.1",
@@ -158,38 +215,23 @@ def main():
          }
     ]
 
+    # TODO: Implement for multiple hosts in 
+    
     host_connection_pool = HostConnectionPool(connection_config=config, connections=3)
     connection_pool = host_connection_pool.initialize_pool()
 
-    q = Queue()
-    prcs = []
-    for host_con in connection_pool:
-        p = Process(target=host_con.sleep, args=(q,))
-        p.start()
-        prcs.append(p)
+    scheduler = Scheduler(files_and_options, connection_pool)
 
-    print("getting from queue")
-    for i in range(1, 4, 1):
-        print(q.get())
+    remote_files_processing = Process(target=scheduler.get_files_and_sizes)
+    local_files_processing = Process(target=scheduler.get_local_files_and_sizes)
 
-    [x.join() for x in prcs]
+    remote_files_processing.start()
+    local_files_processing.start()
 
-    
+    remote_files_processing.join()
+    local_files_processing.join()
 
-    #remote_sync = RemoteSynchronization()
-    #remote_sync.connect(config)
-#
-    #try:
-    #    sender_script_hash = remote_sync.check_sender_script()
-    #except FileNotFoundError:
-    #    remote_sync.sync_sender_script()
-    #else:
-    #    if sender_script_hash != curr_sender_script_hash:
-    #        remote_sync.sync_sender_script()
-    #finally:
-    #    print("Remote sender script: OK")
-#
-    #remote_sync.synchronize(files_and_options)
-#
+    scheduler.synchronize()
+
 
 main()
