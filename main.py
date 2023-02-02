@@ -138,27 +138,32 @@ class Scheduler:
     """
         Take files, syncing option and schedule synchronization subprocesses.
     """
-    def __init__(self, files_and_options: dict, connection_pool: list) -> None:
-        self.files_and_size = files_and_options
+    def __init__(self, config: dict, connection_pool: list) -> None:
+        self.config = config
+        self.connection_pool = connection_pool
         self.remote_files = {}
         self.local_files = {}
 
-    def parse_paths(self) -> list:
-        # resolve wildcard and directories
-
     def get_files_and_sizes(self):
         # find files, get their size and update data struct
-        self.file_paths = self.parse_paths()
-        # O(nm), using dict in nested for it can be O(n)
-        for file in self.file_paths:
-            # size = connection exec du path
-            for item in self.files_and_size:
-                if item['path'] == str(file):
-                    self.remote_files['path'] = item
-                    self.remote_files['path']['size'] = int(size)
+        for host, options in self.config:
+            for file in options['files']:
+            # file is list
+            # O(nm), using dict in nested for it can be O(n)
+                # result = connection exec find -exec du
+            # Update self.config[host][files] = result
 
     def get_local_files_and_sizes(self):
         pass
+
+
+
+
+    def reload(self, configuration):
+
+
+
+
 
     def synchronize(self):
         # sort files, synchronize
@@ -184,6 +189,15 @@ class Scheduler:
 
         [x.join() for x in prcs]
 
+def parse_paths(config: dict) -> dict:
+    # resolve wildcard and directories
+    # Update self.config
+    pass
+
+
+
+def read_configuration():
+    pass
 
 
 def main():
@@ -215,23 +229,35 @@ def main():
          }
     ]
 
-    # TODO: Implement for multiple hosts in 
+    config = {}
+    cfg = {}
+    while True:
+        cfg = read_configuration()
+        if cfg != config and cfg != None:
+            config = cfg
+            Scheduler.reload(configuration=config)
     
-    host_connection_pool = HostConnectionPool(connection_config=config, connections=3)
-    connection_pool = host_connection_pool.initialize_pool()
+        
+        for host in config:
+            connection_config = host['connection_config']
+            Connections = host['connections']
+            files_and_options = host['files_and_options']
+            
+            host_connection_pool = HostConnectionPool(connection_config=config, connections=3)
+            connection_pool = host_connection_pool.initialize_pool()
 
-    scheduler = Scheduler(files_and_options, connection_pool)
+        scheduler = Scheduler(files_and_options, connection_pool)
 
-    remote_files_processing = Process(target=scheduler.get_files_and_sizes)
-    local_files_processing = Process(target=scheduler.get_local_files_and_sizes)
+        remote_files_processing = Process(target=scheduler.get_files_and_sizes)
+        local_files_processing = Process(target=scheduler.get_local_files_and_sizes)
 
-    remote_files_processing.start()
-    local_files_processing.start()
+        remote_files_processing.start()
+        local_files_processing.start()
 
-    remote_files_processing.join()
-    local_files_processing.join()
+        remote_files_processing.join()
+        local_files_processing.join()
 
-    scheduler.synchronize()
+        scheduler.synchronize()
 
 
 main()

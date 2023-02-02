@@ -26,7 +26,7 @@ Include /etc/ssh/sshd_config.d/*.conf
 
 # Logging
 #SyslogFacility AUTH
-#LogLevel INFO
+LogLevel DEBUG
 
 # Authentication:
 
