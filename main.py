@@ -13,15 +13,14 @@ from multiprocessing import Process, Queue, Event
 
 class HostConnection():
     """Connection object"""
-    def __init__(self, config: dict) -> None:
-        self.host = config['host']
-        self.port = int(config['port']) or 22
-        self.username = config['username']
-        self.private_key = config['private_key']
+    def __init__(self, host: str, port: int, username: str, private_key: str) -> None:
+        self.host = host
+        self.port = port
+        self.username = username
+        self.private_key = private_key
         self.connection = object
 
     def open_connection(self) -> object:
-        # self.connection = Connection(host=self.host, user=self.username, port=self.port, connect_kwargs={"key_filename": self.private_key})
         self.connection = client.SSHClient()
         self.connection.set_missing_host_key_policy(client.AutoAddPolicy())
         try:
@@ -47,14 +46,17 @@ class HostConnection():
 
 
 class HostConnectionPool():
-    def __init__(self, connection_config: dict, connections: int) -> None:
-        self.conf_cfg = connection_config
-        self.connections = connections
+    def __init__(self, config: dict) -> None:
+        self.host = config['host']
+        self.port = config['port']
+        self.username = config['username']
+        self.private_key = config['private_key']
+        self.connections = config['connections']
 
     def initialize_pool(self):
         logging.debug("Initializing pool")
         # TODO: Implement interface
-        connection_pool = [HostConnection(self.conf_cfg) for _ in range(0, self.connections, 1)]
+        connection_pool = [HostConnection(self.host, self.port, self.username, self.private_key) for _ in range(0, self.connections, 1)]
         for c in connection_pool:
             try:
                 c.open_connection()
@@ -134,36 +136,104 @@ class RemoteCommands:
         """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
 
 
+class ConfigParser:
+    def __init__(self, config: dict):
+        self.config = config
+
+        self.default_port = 22
+        self.default_connections = 1
+        self.default_username = 'psync'
+
+    def get_address(self, host):
+        try:
+            addr = self.config[host]['host']
+            # Maybe check type and sanitize
+            return addr
+        except KeyError:
+            return None
+
+    def get_port(self, host):
+        try:
+            port = self.config[host]['port']
+            # Maybe check type and sanitize
+            return port
+        except KeyError:
+            return self.default_port
+    
+    def get_private_key(self, host):
+        try:
+            private_key = self.config[host]['private_key']
+            return private_key
+        except KeyError:
+            return None
+    
+    def get_connections(self, host):
+        try:
+            connections = self.config[host]['connections']
+            return connections
+        except KeyError:
+            return self.default_connections
+
+    def get_username(self, host):
+        try:
+            username = self.config[host]['username']
+            return username
+        except KeyError:
+            return self.default_username
+
+    def get_hosts(self) -> list:
+        hosts = list(self.config.keys())
+        return hosts
+
+
+
 class Scheduler:
     """
         Take files, syncing option and schedule synchronization subprocesses.
     """
-    def __init__(self, config: dict, connection_pool: list) -> None:
-        self.config = config
-        self.connection_pool = connection_pool
+    def __init__(self, configuration: dict, config_parser: object) -> None:
+        self.config = configuration
+        self.connection_pool = []
         self.remote_files = {}
         self.local_files = {}
+        self.hosts = []
+        self.private_key = str
 
-    def get_files_and_sizes(self):
-        # find files, get their size and update data struct
-        for host, options in self.config:
-            for file in options['files']:
-            # file is list
-            # O(nm), using dict in nested for it can be O(n)
-                # result = connection exec find -exec du
-            # Update self.config[host][files] = result
+        self.config_parser = config_parser(self.config)
+
+        self.hosts = self.config_parser.get_hosts()
+
+    #def get_files_and_sizes(self):
+    #    # find files, get their size and update data struct
+    #    for host, options in self.config:
+    #        for file in options['files']:
+    #        # file is list
+    #        # O(nm), using dict in nested for it can be O(n)
+    #            # result = connection exec find -exec du
+    #        # Update self.config[host][files] = result
 
     def get_local_files_and_sizes(self):
         pass
 
+    def run(self):
+        for host in self.hosts:
+            config = {
+                'host': self.config_parser.get_address(host),
+                'port': self.config_parser.get_port(host),
+                'private_key': self.config_parser.get_private_key(host),
+                'connections': self.config_parser.get_connections(host),
+                'username': self.config_parser.get_username(host),
+                }
 
+            host_connection_pool = HostConnectionPool(config)
+            connection_pool = host_connection_pool.initialize_pool()
+            [self.connection_pool.append(x) for x in connection_pool]
+            del(host_connection_pool)
 
+        print(self.connection_pool)
 
     def reload(self, configuration):
-
-
-
-
+        pass
 
     def synchronize(self):
         # sort files, synchronize
@@ -189,16 +259,6 @@ class Scheduler:
 
         [x.join() for x in prcs]
 
-def parse_paths(config: dict) -> dict:
-    # resolve wildcard and directories
-    # Update self.config
-    pass
-
-
-
-def read_configuration():
-    pass
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -211,23 +271,26 @@ def main():
     args = parser.parse_args()
 
     config = {
-        'host': "127.0.0.1",
-        'port': 2022,
-        'username': "bob",
-        'private_key': args.private_key,
-        'default_local_storage': "/tmp/",
+        "vm1": {
+            "host": "127.0.0.1",
+            "port": 2022,
+            "username": "bob",
+            "private_key": args.private_key,
+            "default_storage": "/tmp",
+            "files": {
+                "path_or_file": {
+                    "sync_options": "options",
+                    "local_path": "local_path"
+                },
+            },
+        },
     }
 
-    files_and_options = [
-        {"path": "/tmp/1",
-         "sync_options": "-rsync -like -options",
-         "local_path": "/tmp/",
-         },
 
-        {"path": "/tmp/2    ",
-         "sync_options": "-some -options",
-         }
-    ]
+
+    scheduler = Scheduler(configuration=config, config_parser=ConfigParser)
+    scheduler.run()
+    exit()
 
     config = {}
     cfg = {}
