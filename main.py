@@ -9,6 +9,7 @@ from fabric import Connection
 from paramiko import client
 
 from multiprocessing import Process, Queue, Event
+from queue import Empty
 
 
 class HostConnection():
@@ -21,6 +22,7 @@ class HostConnection():
         self.connection = object
 
     def open_connection(self) -> object:
+        print("opening")
         self.connection = client.SSHClient()
         self.connection.set_missing_host_key_policy(client.AutoAddPolicy())
         try:
@@ -29,20 +31,16 @@ class HostConnection():
             print(e)
             return None
 
-        transport = self.connection.get_transport()
-        transport.atfork()
+        # Somehow I don't need to set it when the connection is passed to command, maybe it happens automatically
+        # Should solve problem with shared socket between parent child processes, shall create new socket at fork
+        # transport = self.connection.get_transport()
+        # transport.atfork()
+        con = self.connection
+        print("opened")
+        return con
 
     def close_connection(self):
         self.connection.close()
-
-    def sleep(self, q):
-        print("Sleeping")
-        self.open_connection()
-        self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
-        sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
-        out = sout.readlines()
-        q.put([self.host, out])
-        print("Woken up!")
 
 
 class HostConnectionPool():
@@ -67,7 +65,7 @@ class HostConnectionPool():
 
         if not connection_pool:
             logging.error("Connection pool is empty  for host %s", self.conf_cfg["host"])
-            return
+            return None
         return connection_pool
 
 
@@ -77,9 +75,11 @@ class RemoteCommands:
        Data queue is used for control data - sizes, hashes
        Management queue is used for siginalization
     """
-    def __init__(self, connection: HostConnection, data_queue: Queue):
+    def __init__(self, connection: HostConnection, data_queue: Queue, event: Event, host_id: str):
         self.connection = connection
         self.data_queue = data_queue
+        self.event = event
+        self.id = host_id
 
     def check_sender_script(self):
         """Return checksum of script or none"""
@@ -120,17 +120,26 @@ class RemoteCommands:
         print("Copying remote synchronization script")
         pass
 
-    def sleep(self):
-        print("Sleeping")
-        self.connection.open_connection()
-        exit()
-        sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
+    def remote_sleep(self):
+        print("Remote sleep command")
+        c = self.connection.open_connection()
+        sin, sout, serr = c.exec_command("sleep 1 && echo Up!")
         out = sout.readlines()
-        self.data_queue.put([self.host, out])
-        print("Woken up!")
+        time.sleep(1)
+        self.data_queue.put([out])
+        self.event.set()
 
-    def get_files_and_sizes(self) -> dict:
+    def get_files_and_sizes(self, files: list) -> dict:
         """Find files, get their size return list sorted by size."""
+        print("Remote command get files and sizes")
+        c = self.connection.open_connection()
+        file_paths = ','.join(files)
+        cmd = 'IFS=','; for i in {} ; do find $i ; done'.format(file_paths)
+        print(cmd)
+        sin, sout, serr = c.exec_command("IFS=','; for i in \"a,b,c,d\" ; do echo \"new: $i\" ; done")
+        out = sout.readlines()
+        self.data_queue.put({self.id: out})
+        print("CMD finished")
 
     def calculate_file_hash(self) -> dict:
         """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
@@ -152,6 +161,10 @@ class ConfigParser:
             return addr
         except KeyError:
             return None
+
+    def get_files(self, host):
+        files = list(self.config[host]['files'].keys())
+        return files
 
     def get_port(self, host):
         try:
@@ -209,6 +222,7 @@ class Scheduler:
         pass
 
     def run(self):
+
         for host in self.hosts:
             config = {
                 'host': self.config_parser.get_address(host),
@@ -224,30 +238,37 @@ class Scheduler:
             self.connection_pool[host] = connections
 
         conns = 0
+        event = Event()
         queue = Queue()
-        while conns < self.max_parallel_conns:
-            for host in self.hosts:
-                # self.config_parser.get_files(host)
-                main_connection = self.connection_pool[host][0]
-                remote_command = RemoteCommands(connection=main_connection, data_queue=queue)
-                #files_and_sizes_sorted = remote_command.get_files_and_sizes
-                #local_files_and_sizes = remote_command.get_local_files_and_sizes
-                
-                #remote_files_processing = Process(target=files_and_sizes_sorted, args=(main_connection, queue))
-                #local_files_processing = Process(target=local_files_and_sizes)
+        res = []
+        for host in self.hosts:
+            if not event:
+                pass
+            else:
+                print("some process has done work")
+                conns += 1
 
-                #remote_files_processing.start()
-                #local_files_processing.start()
+            files = self.config_parser.get_files(host)
+            main_connection = self.connection_pool[host][0]
 
-                #remote_files_processing.join()
-                #local_files_processing.join()
+            remote_command = RemoteCommands(connection=main_connection, data_queue=queue, event=event, host_id=host)
+            files_and_sizes_sorted = remote_command.get_files_and_sizes
+            # local_files_and_sizes = remote_command.get_local_files_and_sizes
 
+            remote_files_processing = Process(target=files_and_sizes_sorted, args=(files,))
 
-                sleeper = main_connection.sleep
-                sleeper_process = Process(target=sleeper, args=(queue,))
-                sleeper_process.start()
-                print(queue.get())
+            if conns <= self.max_parallel_conns:
+                conns -= 1
+                remote_files_processing.start()
+            try:
+                res.append(queue.get(block=False, timeout=0.05))
+            except Empty:
+                continue
 
+        while len(res) < len(self.hosts):
+            res.append(queue.get())
+
+        print(res)
 
 
     def reload(self, configuration):
