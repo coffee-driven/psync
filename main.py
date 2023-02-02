@@ -35,13 +35,13 @@ class HostConnection():
     def close_connection(self):
         self.connection.close()
 
-    def sleep(self, q, signal):
+    def sleep(self, q):
         print("Sleeping")
+        self.open_connection()
         self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
         sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
         out = sout.readlines()
         q.put([self.host, out])
-        signal.set()
         print("Woken up!")
 
 
@@ -77,10 +77,9 @@ class RemoteCommands:
        Data queue is used for control data - sizes, hashes
        Management queue is used for siginalization
     """
-    def __init__(self, connection: HostConnection, data_queue: Queue, management_queue: Queue):
+    def __init__(self, connection: HostConnection, data_queue: Queue):
         self.connection = connection
         self.data_queue = data_queue
-        self.management_queue = management_queue
 
     def check_sender_script(self):
         """Return checksum of script or none"""
@@ -121,19 +120,21 @@ class RemoteCommands:
         print("Copying remote synchronization script")
         pass
 
-    def sleep(self, q):
+    def sleep(self):
         print("Sleeping")
-        self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
+        self.connection.open_connection()
+        exit()
         sin, sout, serr = self.connection.exec_command("sleep 1 && ls /")
         out = sout.readlines()
-        q.put([self.host, out])
+        self.data_queue.put([self.host, out])
         print("Woken up!")
 
-    def find_file_size(self) -> dict:
-        """Find files and their size"""
+    def get_files_and_sizes(self) -> dict:
+        """Find files, get their size return list sorted by size."""
 
     def calculate_file_hash(self) -> dict:
         """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
+        pass
 
 
 class ConfigParser:
@@ -159,14 +160,14 @@ class ConfigParser:
             return port
         except KeyError:
             return self.default_port
-    
+
     def get_private_key(self, host):
         try:
             private_key = self.config[host]['private_key']
             return private_key
         except KeyError:
             return None
-    
+
     def get_connections(self, host):
         try:
             connections = self.config[host]['connections']
@@ -186,16 +187,16 @@ class ConfigParser:
         return hosts
 
 
-
 class Scheduler:
     """
         Take files, syncing option and schedule synchronization subprocesses.
     """
-    def __init__(self, configuration: dict, config_parser: object) -> None:
+    def __init__(self, scheduler_configuration: dict, configuration: dict, config_parser: object) -> None:
         self.config = configuration
-        self.connection_pool = []
+        self.connection_pool = {}
         self.remote_files = {}
         self.local_files = {}
+        self.max_parallel_conns = scheduler_configuration['max_parallel_connections']
         self.hosts = []
         self.private_key = str
 
@@ -203,14 +204,6 @@ class Scheduler:
 
         self.hosts = self.config_parser.get_hosts()
 
-    #def get_files_and_sizes(self):
-    #    # find files, get their size and update data struct
-    #    for host, options in self.config:
-    #        for file in options['files']:
-    #        # file is list
-    #        # O(nm), using dict in nested for it can be O(n)
-    #            # result = connection exec find -exec du
-    #        # Update self.config[host][files] = result
 
     def get_local_files_and_sizes(self):
         pass
@@ -227,10 +220,35 @@ class Scheduler:
 
             host_connection_pool = HostConnectionPool(config)
             connection_pool = host_connection_pool.initialize_pool()
-            [self.connection_pool.append(x) for x in connection_pool]
-            del(host_connection_pool)
+            connections = [x for x in connection_pool]
+            self.connection_pool[host] = connections
 
-        print(self.connection_pool)
+        conns = 0
+        queue = Queue()
+        while conns < self.max_parallel_conns:
+            for host in self.hosts:
+                # self.config_parser.get_files(host)
+                main_connection = self.connection_pool[host][0]
+                remote_command = RemoteCommands(connection=main_connection, data_queue=queue)
+                #files_and_sizes_sorted = remote_command.get_files_and_sizes
+                #local_files_and_sizes = remote_command.get_local_files_and_sizes
+                
+                #remote_files_processing = Process(target=files_and_sizes_sorted, args=(main_connection, queue))
+                #local_files_processing = Process(target=local_files_and_sizes)
+
+                #remote_files_processing.start()
+                #local_files_processing.start()
+
+                #remote_files_processing.join()
+                #local_files_processing.join()
+
+
+                sleeper = main_connection.sleep
+                sleeper_process = Process(target=sleeper, args=(queue,))
+                sleeper_process.start()
+                print(queue.get())
+
+
 
     def reload(self, configuration):
         pass
@@ -270,6 +288,10 @@ def main():
 
     args = parser.parse_args()
 
+    scheduler_config = {
+        'max_parallel_connections': 100,
+    }
+
     config = {
         "vm1": {
             "host": "127.0.0.1",
@@ -277,6 +299,21 @@ def main():
             "username": "bob",
             "private_key": args.private_key,
             "default_storage": "/tmp",
+            "connections": 3,
+            "files": {
+                "path_or_file": {
+                    "sync_options": "options",
+                    "local_path": "local_path"
+                },
+            },
+        },
+        "vm2": {
+            "host": "127.0.0.1",
+            "port": 2022,
+            "username": "bob",
+            "private_key": args.private_key,
+            "default_storage": "/tmp",
+            "connections": 3,
             "files": {
                 "path_or_file": {
                     "sync_options": "options",
@@ -286,9 +323,7 @@ def main():
         },
     }
 
-
-
-    scheduler = Scheduler(configuration=config, config_parser=ConfigParser)
+    scheduler = Scheduler(scheduler_configuration=scheduler_config, configuration=config, config_parser=ConfigParser)
     scheduler.run()
     exit()
 
@@ -299,28 +334,7 @@ def main():
         if cfg != config and cfg != None:
             config = cfg
             Scheduler.reload(configuration=config)
-    
-        
-        for host in config:
-            connection_config = host['connection_config']
-            Connections = host['connections']
-            files_and_options = host['files_and_options']
-            
-            host_connection_pool = HostConnectionPool(connection_config=config, connections=3)
-            connection_pool = host_connection_pool.initialize_pool()
-
-        scheduler = Scheduler(files_and_options, connection_pool)
-
-        remote_files_processing = Process(target=scheduler.get_files_and_sizes)
-        local_files_processing = Process(target=scheduler.get_local_files_and_sizes)
-
-        remote_files_processing.start()
-        local_files_processing.start()
-
-        remote_files_processing.join()
-        local_files_processing.join()
-
-        scheduler.synchronize()
 
 
-main()
+if __name__ == "__main__":
+    main()
