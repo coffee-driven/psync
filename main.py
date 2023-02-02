@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import re
 import time
 
 from fabric import Connection
@@ -81,6 +82,36 @@ class RemoteCommands:
         self.event = event
         self.id = host_id
 
+    def calculate_file_hash(self, files: dict) -> dict:
+        """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
+        print("Calculating file hash")
+        print(files)
+        for i in files:
+            print(i)
+            host_files = files[i]
+        file_paths = ' '.join(host_files.keys())
+        print("here")
+        print(file_paths)
+
+        cmd = 'echo {}'.format(file_paths)
+
+        c = self.connection.open_connection()
+        a ,b, c = c.exec_command(cmd)
+        checksums_files = b.readlines()
+        time.sleep(3)
+        print(c.readlines())
+        return
+
+        data = {}
+        for checksum_file in checksums_files:
+            listed = re.split("\t", checksum_file)
+            checksum = str(listed[0])
+            file = str(listed[1]).rstrip("\n")
+            data[file] = checksum
+
+        self.data_queue.put({self.id: data})
+
+
     def check_sender_script(self):
         """Return checksum of script or none"""
         try:
@@ -133,17 +164,27 @@ class RemoteCommands:
         """Find files, get their size return list sorted by size."""
         print("Remote command get files and sizes")
         c = self.connection.open_connection()
-        file_paths = ','.join(files)
-        cmd = 'IFS=','; for i in {} ; do find $i ; done'.format(file_paths)
-        print(cmd)
-        sin, sout, serr = c.exec_command("IFS=','; for i in \"a,b,c,d\" ; do echo \"new: $i\" ; done")
+        file_paths = ' '.join(files)
+        cmd = 'for i in {} ; do find $i ; done'.format(file_paths)
+        sin, sout, serr = c.exec_command(cmd)
         out = sout.readlines()
-        self.data_queue.put({self.id: out})
+        all_files = ' '.join(out)
+        cmd = 'du {}'.format(all_files)
+        sin, sout, serr = c.exec_command(cmd)
+        sizes_files = sout.readlines()
         print("CMD finished")
 
-    def calculate_file_hash(self) -> dict:
-        """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
-        pass
+        data = {}
+        for size_file in sizes_files:
+            listed = re.split("\t", size_file)
+            size = int(listed[0])
+            file = str(listed[1]).rstrip("\n")
+            data[file] = size
+
+        sorted_by_size = dict(sorted(data.items(), key=lambda x: x[1]))
+        self.data_queue.put({self.id: sorted_by_size})
+
+
 
 
 class ConfigParser:
@@ -217,7 +258,6 @@ class Scheduler:
 
         self.hosts = self.config_parser.get_hosts()
 
-
     def get_local_files_and_sizes(self):
         pass
 
@@ -240,7 +280,7 @@ class Scheduler:
         conns = 0
         event = Event()
         queue = Queue()
-        res = []
+        files_sizes = []
         for host in self.hosts:
             if not event:
                 pass
@@ -261,15 +301,49 @@ class Scheduler:
                 conns -= 1
                 remote_files_processing.start()
             try:
-                res.append(queue.get(block=False, timeout=0.05))
+                files_sizes.append(queue.get(block=False, timeout=0.05))
             except Empty:
                 continue
 
-        while len(res) < len(self.hosts):
-            res.append(queue.get())
+        hash_queue = Queue()
+        checksum_event = Event()
+        files_checksums = []
 
-        print(res)
+        while True:
+            print("run")
+            files_checksums = []
+            try:
+                files_checksums.append(hash_queue.get(block=False, timeout=3))
+            except Empty:
+                pass
 
+            if len(files_sizes) == 0:
+                try:
+                    files_sizes.append(queue.get(block=False, timeout=1))
+                    time.sleep(2)
+                except Empty:
+                    continue
+
+            files_sizes_host = files_sizes.pop(0)
+            remote_command = RemoteCommands(connection=main_connection, data_queue=hash_queue, event=checksum_event, host_id=host)
+            remote_checksum_calculation = remote_command.calculate_file_hash
+            remote_checksum_calculation_process = Process(target=remote_checksum_calculation, args=(files_sizes_host,))
+
+            print("Checksumimg")
+
+            if checksum_event:
+                print("Some checksum process is done")
+                conns += 1
+            if conns <= self.max_parallel_conns:
+                conns -= 1
+                remote_checksum_calculation_process.start()
+            try:
+                files_checksums.append(hash_queue.get(block=False, timeout=0.05))
+            except Empty:
+                time.sleep(3)
+
+        
+        # print(hash_queue.get(timeout=2))
 
     def reload(self, configuration):
         pass
@@ -322,7 +396,7 @@ def main():
             "default_storage": "/tmp",
             "connections": 3,
             "files": {
-                "path_or_file": {
+                "/home/testfile": {
                     "sync_options": "options",
                     "local_path": "local_path"
                 },
@@ -336,7 +410,7 @@ def main():
             "default_storage": "/tmp",
             "connections": 3,
             "files": {
-                "path_or_file": {
+                "/home/testfile": {
                     "sync_options": "options",
                     "local_path": "local_path"
                 },
