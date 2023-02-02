@@ -2,4 +2,5 @@
 
 mkdir /run/sshd || exit 2
 
-/usr/sbin/sshd -D
+# Launch in foreground and log to STDERR
+/usr/sbin/sshd -D -e
