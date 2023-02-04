@@ -33,7 +33,7 @@ class HostConnection():
             return None
 
         # Somehow I don't need to set it when the connection is passed to command, maybe it happens automatically
-        # Should solve problem with shared socket between parent child processes, shall create new socket at fork
+        # Should solve problem with shared socket between parent and child processes, shall create new socket at fork
         # transport = self.connection.get_transport()
         # transport.atfork()
         con = self.connection
@@ -76,30 +76,35 @@ class RemoteCommands:
        Data queue is used for control data - sizes, hashes
        Management queue is used for siginalization
     """
-    def __init__(self, connection: HostConnection, data_queue: Queue, event: Event, host_id: str):
+    def __init__(self, connection: HostConnection, data_queue: Queue, host_id: str):
+        Process.__init__(self)
         self.connection = connection
         self.data_queue = data_queue
-        self.event = event
         self.id = host_id
 
-    def calculate_file_hash(self, files: dict) -> dict:
-        """Calculate hash of file, files are sorted to groups small, medium and large, each group is processed as separate process."""
+    def calculate_file_hash(self, status: Event, status_struct: dict) -> dict:
+        """Calculate hash of file, files are sorted by size"""
         print("Calculating file hash")
+        files = []
+        files = self.data_queue.get()
+        print("Get from queue")
         print(files)
+
+        print(files)
+
         for i in files:
             print(i)
-            host_files = files[i]
-        file_paths = ' '.join(host_files.keys())
+        file_paths = ' '.join(files)
         print("here")
         print(file_paths)
 
         cmd = 'echo {}'.format(file_paths)
 
         c = self.connection.open_connection()
-        a ,b, c = c.exec_command(cmd)
-        checksums_files = b.readlines()
+        _, sout, _ = c.exec_command(cmd)
+        checksums_files = sout.readlines()
         time.sleep(3)
-        print(c.readlines())
+        print(checksums_files)
         return
 
         data = {}
@@ -151,14 +156,14 @@ class RemoteCommands:
         print("Copying remote synchronization script")
         pass
 
-    def remote_sleep(self):
+    def remote_sleep(self, event: Event):
         print("Remote sleep command")
         c = self.connection.open_connection()
         sin, sout, serr = c.exec_command("sleep 1 && echo Up!")
         out = sout.readlines()
         time.sleep(1)
         self.data_queue.put([out])
-        self.event.set()
+        event.set()
 
     def get_files_and_sizes(self, files: list) -> dict:
         """Find files, get their size return list sorted by size."""
@@ -168,10 +173,12 @@ class RemoteCommands:
         cmd = 'for i in {} ; do find $i ; done'.format(file_paths)
         sin, sout, serr = c.exec_command(cmd)
         out = sout.readlines()
+
         all_files = ' '.join(out)
         cmd = 'du {}'.format(all_files)
         sin, sout, serr = c.exec_command(cmd)
         sizes_files = sout.readlines()
+
         print("CMD finished")
 
         data = {}
@@ -182,9 +189,9 @@ class RemoteCommands:
             data[file] = size
 
         sorted_by_size = dict(sorted(data.items(), key=lambda x: x[1]))
+        print("Putting to queue")
+        print(sorted_by_size)
         self.data_queue.put({self.id: sorted_by_size})
-
-
 
 
 class ConfigParser:
@@ -263,8 +270,16 @@ class Scheduler:
 
     def run(self):
 
+        global_status = {}
+        first_stage_counter = 0
+        first_stage_queue = Queue()
+        process_list = []
+        second_stage_queues = []
+        status_update_event = Event()
+
         for host in self.hosts:
-            config = {
+            print("FIRST RUN")
+            conn_config = {
                 'host': self.config_parser.get_address(host),
                 'port': self.config_parser.get_port(host),
                 'private_key': self.config_parser.get_private_key(host),
@@ -272,78 +287,83 @@ class Scheduler:
                 'username': self.config_parser.get_username(host),
                 }
 
-            host_connection_pool = HostConnectionPool(config)
+            host_connection_pool = HostConnectionPool(conn_config)
             connection_pool = host_connection_pool.initialize_pool()
             connections = [x for x in connection_pool]
             self.connection_pool[host] = connections
 
-        conns = 0
-        event = Event()
-        queue = Queue()
-        files_sizes = []
-        for host in self.hosts:
-            if not event:
-                pass
-            else:
-                print("some process has done work")
-                conns += 1
+            global_status[host] = {}
 
             files = self.config_parser.get_files(host)
-            main_connection = self.connection_pool[host][0]
+            connector = self.connection_pool[host][0]
 
-            remote_command = RemoteCommands(connection=main_connection, data_queue=queue, event=event, host_id=host)
+            remote_command = RemoteCommands(connection=connector, data_queue=first_stage_queue, host_id=host)
             files_and_sizes_sorted = remote_command.get_files_and_sizes
             # local_files_and_sizes = remote_command.get_local_files_and_sizes
 
+            print("Check files and sizes")
             remote_files_processing = Process(target=files_and_sizes_sorted, args=(files,))
+            remote_files_processing.start()
 
-            if conns <= self.max_parallel_conns:
-                conns -= 1
-                remote_files_processing.start()
-            try:
-                files_sizes.append(queue.get(block=False, timeout=0.05))
-            except Empty:
-                continue
+            # Create private queue for host
+            print("Create host queue")
+            q = Queue()
+            second_stage_queues.append(q)
+            print(second_stage_queues)
 
-        hash_queue = Queue()
-        checksum_event = Event()
-        files_checksums = []
-
+        first_stage_counter = 1
         while True:
-            print("run")
-            files_checksums = []
-            try:
-                files_checksums.append(hash_queue.get(block=False, timeout=3))
-            except Empty:
-                pass
+            if first_stage_counter == len(self.hosts):
+                break
+            else:
+                first_stage_counter += 1
 
-            if len(files_sizes) == 0:
-                try:
-                    files_sizes.append(queue.get(block=False, timeout=1))
-                    time.sleep(2)
-                except Empty:
-                    continue
+            files_sizes = first_stage_queue.get()
+            print("Getting from queue first stage")
+            print(files_sizes)
 
-            files_sizes_host = files_sizes.pop(0)
-            remote_command = RemoteCommands(connection=main_connection, data_queue=hash_queue, event=checksum_event, host_id=host)
-            remote_checksum_calculation = remote_command.calculate_file_hash
-            remote_checksum_calculation_process = Process(target=remote_checksum_calculation, args=(files_sizes_host,))
+            hostname = list(files_sizes.keys())[0]
+            for _, values in files_sizes.items():
+                files = values
 
-            print("Checksumimg")
+            print("Create download list")
+            download_list = [str(filename) for filename in files.keys()]
+            print(download_list)
+            flow_queue = second_stage_queues.pop()
 
-            if checksum_event:
-                print("Some checksum process is done")
-                conns += 1
-            if conns <= self.max_parallel_conns:
-                conns -= 1
-                remote_checksum_calculation_process.start()
-            try:
-                files_checksums.append(hash_queue.get(block=False, timeout=0.05))
-            except Empty:
-                time.sleep(3)
+            global_status[hostname] = {
+                'size_and_files': 'OK',
+                'max_tries': 3,
+                'tries': 0,
+            }
 
+            print("Putting list to host queue")
+            flow_queue = second_stage_queues.pop()
+            flow_queue.put(download_list)
+
+            checksum_command = RemoteCommands(connection=connector, data_queue=flow_queue, host_id=host)
+            remote_checksum = checksum_command.calculate_file_hash
+            remote_checksum_calculation_process = Process(target=remote_checksum, args=(status_update_event, global_status))
+
+         #   get_command = RemoteCommands(connection=connector, data_queue=flow_queue, host_id=host)
+         #   get_file = get_command.get_file
+         #   get_file_process = Process(target=get_file)
+#
+         #   check_downloaded_file = Process(target=check_downloaded_file, args=(flow_queue, global_status))
+#
+            remote_checksum_calculation_process.start()
+         #   get_file_process.start()
+         #   check_downloaded_file.start()
+#
+            process_list.append(remote_checksum_calculation_process)
+         #   process_list.append(get_file_process)
+         #   process_list.append(check_downloaded_file)
+            remote_checksum_calculation_process.join()
+
+
+        # Check status, if done, close queues, terminate processes, update status
         
-        # print(hash_queue.get(timeout=2))
+        print(global_status)
 
     def reload(self, configuration):
         pass
