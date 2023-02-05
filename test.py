@@ -21,11 +21,11 @@ class Worker:
             o = sout.readline()
             print(type(o))
             time.sleep(0.3)
-            if c == 6:
-                o = None
-                print("YES")
-                self.q.put(o)
-                return
+            #if c == 6:
+            #    o = None
+            #    print("YES")
+            #    self.q.put(o)
+            #    return
             self.q.put(o)
 
 def main():
@@ -40,5 +40,6 @@ def main():
         print(m)
         print(p.is_alive())
     p.join()
+
 
 main()

@@ -135,7 +135,6 @@ class RemoteCommands:
 
                 print("Calculate file hash: PUT")
                 self.data_out.put({file: checksum})
-                print("After")
 
     def get_file(self):
         c = self.connection.open_connection()
@@ -144,10 +143,10 @@ class RemoteCommands:
                 files = self.data_in.get(block=False, timeout=0.2)
             except Empty:
                 continue
-         
+
             if files[0] is None:
                 return
-            
+
             for file in files:
                 print("Get File")
                 self.data_out.put({'file': True})
@@ -249,7 +248,7 @@ class Scheduler:
     """
         Take files, syncing option and schedule synchronization subprocesses.
     """
-    def __init__(self, scheduler_configuration: dict, configuration: dict, config_parser: object) -> None:
+    def __init__(self, scheduler_configuration: dict, configuration: dict, config_parser: object, reload: Event) -> None:
         self.config = configuration
         self.connection_pool = {}
         self.remote_files = {}
@@ -257,6 +256,7 @@ class Scheduler:
         self.max_parallel_conns = scheduler_configuration['max_parallel_connections']
         self.hosts = []
         self.private_key = str
+        self.reload = reload
 
         self.config_parser = config_parser(self.config)
 
@@ -270,6 +270,7 @@ class Scheduler:
         first_stage_counter = 0
         first_stage_queue_out = Queue()
         second_stage_queue_out = Queue()
+        reload_event = Event()
 
         # First stage
         for host in self.hosts:
@@ -332,17 +333,23 @@ class Scheduler:
             }
 
             pipeline_queue_in = Queue()
-            pipeline = Pipeline(pipeline_queue_in, second_stage_queue_out, host_name, connection_pool)
+            pipeline = Pipeline(pipeline_queue_in, second_stage_queue_out, host_name, connection_pool, reload_event)
             command_pipeline = pipeline.command_pipeline
             pipeline_process = Process(target=command_pipeline)
             pipeline_process.start()
             pipeline_queue_in.put(download_list)
 
-        pipeline_process.join()
+        # Consume output of second stage
         result = []
         res = ""
         while True:
             print("RUNING MAIN")
+            if self.reload.is_set():
+                print("Scheduler reloading")
+                reload_event.set()
+                pipeline_process.join()
+                return
+
             try:
                 res = second_stage_queue_out.get(timeout=0.3)
             except Empty:
@@ -365,16 +372,16 @@ class Scheduler:
 
 
 class Pipeline:
-    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool) -> None:
+    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, reload: Event) -> None:
         self.data_in = data_in
         self.data_out = data_out
         self.host_id = host_id
         self.connections = connections
+        self.reload = reload
 
     def command_pipeline(self):
         print("pipeline is running")
         filenames = self.data_in.get()
-        print(len(filenames))
         filenames_ok = 0
 
         checksum_queue_in = Queue()
@@ -401,6 +408,14 @@ class Pipeline:
 
         while True:
             print("RUNING PIPELINE")
+            if self.reload.is_set():
+                print("Pipeline terminating command processes")
+                checksum_queue_in.put([None])
+                download_queue_in.put([None])
+                local_check_queue_in.put([None])
+
+                return
+
             print("Check checksum queue")
             try:
                 file = checksum_queue_out.get(block=False, timeout=0.2)
@@ -440,7 +455,7 @@ class Pipeline:
                         print("FILE OK")
                         filenames_ok += 1
                         self.data_out.put({self.host_id: filename})
-            
+
             if len(filenames) == filenames_ok:
                 # Poison pill
                 print("Poisoning pipeline subprocesses")
@@ -450,18 +465,8 @@ class Pipeline:
 
                 return
 
-    def reload(self, configuration):
-        pass
 
 def main():
-    parser = argparse.ArgumentParser(
-                    prog = 'ProgramName',
-                    description = 'What the program does',
-                    epilog = 'Text at the bottom of help')
-    parser.add_argument('--remote_path', dest='remote_path', help='Local path')
-    parser.add_argument('--private_key', dest='private_key', action='store', help='Private key', required=True) 
-
-    args = parser.parse_args()
 
     scheduler_config = {
         'max_parallel_connections': 100,
@@ -497,9 +502,16 @@ def main():
             },
         },
     }
-
-    scheduler = Scheduler(scheduler_configuration=scheduler_config, configuration=config, config_parser=ConfigParser)
-    scheduler.run()
+    
+    # Write config checker
+    # Write manager that will receive notifications from config checker and reload scheduler.
+    reload_scheduler = Event()
+    scheduler = Scheduler(scheduler_configuration=scheduler_config, configuration=config, config_parser=ConfigParser, reload=reload_scheduler)
+    schedule = scheduler.run
+    process = Process(target=schedule)
+    process.start()
+    reload_scheduler.set()
+    process.join()
     exit()
 
     config = {}
@@ -512,4 +524,13 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+                    prog = 'ProgramName',
+                    description = 'What the program does',
+                    epilog = 'Text at the bottom of help')
+    parser.add_argument('--remote_path', dest='remote_path', help='Local path')
+    parser.add_argument('--private_key', dest='private_key', action='store', help='Private key', required=True) 
+
+    args = parser.parse_args()
+
     main()
