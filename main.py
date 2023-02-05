@@ -84,6 +84,7 @@ class LocalCommands:
         # Logic to get file, hash, compare output
             self.data_out.put({'file': True})
 
+
 class RemoteCommands:
     """
        Remote command object.
@@ -101,7 +102,7 @@ class RemoteCommands:
         files = []
         while True:
             try:
-                files = self.data_in.get(block=False, timeout=0.2)
+                files = self.data_in.get(block=False, timeout=0.5)
             except Empty:
                 continue
 
@@ -126,7 +127,6 @@ class RemoteCommands:
             print("Checksums")
             print(checksums_files)
 
-            data = {}
             for checksum_file in checksums_files:
                 # md5sum splits the data by two spaces (Debian10)
                 listed = re.split("  ", checksum_file)
@@ -135,6 +135,7 @@ class RemoteCommands:
 
                 print("Calculate file hash: PUT")
                 self.data_out.put({file: checksum})
+                print("After")
 
     def get_file(self):
         c = self.connection.open_connection()
@@ -195,7 +196,7 @@ class ConfigParser:
         self.config = config
 
         self.default_port = 22
-        self.default_connections = 1
+        self.default_connections = 3
         self.default_username = 'psync'
 
     def get_address(self, host):
@@ -280,7 +281,7 @@ class Scheduler:
                 'connections': self.config_parser.get_connections(host),
                 'username': self.config_parser.get_username(host),
                 }
-            
+
             global_status[host] = {}
             files = self.config_parser.get_files(host)
 
@@ -299,19 +300,24 @@ class Scheduler:
             input.put(files)
 
         # Second stage
-        first_stage_counter = 1
+        first_stage_counter = 0
         while True:
             if first_stage_counter == len(self.hosts):
                 break
+
+            print("Getting from queue first stage")
+            try:
+                files_sizes = first_stage_queue_out.get(block=False, timeout=0.2)
+            except Empty:
+                continue
             else:
                 first_stage_counter += 1
 
-            print("Getting from queue first stage")
-            files_sizes = first_stage_queue_out.get()
+            print("SECOND STAGE")
             print(files_sizes)
 
             host_name = list(files_sizes.keys())[0]
-            
+
             print("Create download list")
             download_list = []
             for filename, _ in files_sizes.items():
@@ -326,15 +332,13 @@ class Scheduler:
             }
 
             pipeline_queue_in = Queue()
-            pipeline_process = Process(target=self.command_pipeline, args=(pipeline_queue_in, second_stage_queue_out, host_name, connection_pool))
+            pipeline = Pipeline(pipeline_queue_in, second_stage_queue_out, host_name, connection_pool)
+            command_pipeline = pipeline.command_pipeline
+            pipeline_process = Process(target=command_pipeline)
             pipeline_process.start()
             pipeline_queue_in.put(download_list)
 
-
-        # Check status, if done, close queues, terminate processes, update status
-
-        # pipeline_process.join()
-
+        pipeline_process.join()
         result = []
         res = ""
         while True:
@@ -342,23 +346,40 @@ class Scheduler:
             try:
                 res = second_stage_queue_out.get(timeout=0.3)
             except Empty:
-                time.sleep(0.3)
-            finally:
-                if res is None:
+                if not pipeline_process.is_alive():
                     break
+                time.sleep(0.3)
+            else:
                 result.append(res)
-                print("END")
+
+        while True:
+            try:
+                res = second_stage_queue_out.get(timeout=0.3)
+            except Empty:
+                break
+            else:
+                result.append(res)
+
         print(result)
         return
 
-    def command_pipeline(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool):
+
+class Pipeline:
+    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool) -> None:
+        self.data_in = data_in
+        self.data_out = data_out
+        self.host_id = host_id
+        self.connections = connections
+
+    def command_pipeline(self):
         print("pipeline is running")
-        filenames = data_in.get()
+        filenames = self.data_in.get()
+        print(len(filenames))
         filenames_ok = 0
 
         checksum_queue_in = Queue()
         checksum_queue_out = Queue()
-        checksum_command = RemoteCommands(connection=connections[0], data_in=checksum_queue_in, data_out=checksum_queue_out)
+        checksum_command = RemoteCommands(connection=self.connections[0], data_in=checksum_queue_in, data_out=checksum_queue_out)
         remote_checksum = checksum_command.calculate_file_hash
         remote_checksum_calculation_process = Process(target=remote_checksum)
         remote_checksum_calculation_process.start()
@@ -366,7 +387,7 @@ class Scheduler:
 
         download_queue_in = Queue()
         download_queue_out = Queue()
-        get_command = RemoteCommands(connection=connections[1], data_in=download_queue_in, data_out=download_queue_out)
+        get_command = RemoteCommands(connection=self.connections[1], data_in=download_queue_in, data_out=download_queue_out)
         get_file = get_command.get_file
         get_file_process = Process(target=get_file)
         get_file_process.start()
@@ -385,8 +406,8 @@ class Scheduler:
                 file = checksum_queue_out.get(block=False, timeout=0.2)
             except Empty:
                 print("empty")
-                pass
-            finally:
+            else:
+                print("Finally")
                 for k, v in file.items():
                     filename = k
                     hash = v
@@ -397,8 +418,8 @@ class Scheduler:
             try:
                 dloaded_file = download_queue_out.get(block=False, timeout=0.2)
             except Empty:
-                pass
-            finally:
+                print("DLOAD QUEUE: empty")
+            else:
                 print("HERE")
                 print("Putting on check queue")
                 local_check_queue_in.put([dloaded_file])
@@ -408,7 +429,7 @@ class Scheduler:
                 dload_status = local_check_queue_out.get(block=False, timeout=0.2)
             except Empty:
                 pass
-            finally:
+            else:
                 # Implement checks and retries
                 print("Dloaded")
                 for filename, ok in dload_status.items():
@@ -418,14 +439,14 @@ class Scheduler:
                     else:
                         print("FILE OK")
                         filenames_ok += 1
-                        data_out.put({host_id: filename})
+                        self.data_out.put({self.host_id: filename})
             
             if len(filenames) == filenames_ok:
                 # Poison pill
+                print("Poisoning pipeline subprocesses")
                 checksum_queue_in.put([None])
                 download_queue_in.put([None])
                 local_check_queue_in.put([None])
-                data_out.put([None])
 
                 return
 
