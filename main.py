@@ -13,182 +13,16 @@ from multiprocessing import Process, Queue, Event
 from queue import Empty
 
 
-class HostConnection():
-    """Connection object"""
-    def __init__(self, host: str, port: int, username: str, private_key: str) -> None:
-        self.host = host
-        self.port = port
-        self.username = username
-        self.private_key = private_key
-        self.connection = object
+def logger():
+    logger = logging.getLogger()
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
 
-    def open_connection(self) -> object:
-        print("opening")
-        self.connection = client.SSHClient()
-        self.connection.set_missing_host_key_policy(client.AutoAddPolicy())
-        try:
-            self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
-        except Exception as e:
-            print(e)
-            return None
+    return logger
 
-        con = self.connection
-        print("opened")
-        return con
-
-    def close_connection(self):
-        self.connection.close()
-
-
-class HostConnectionPool():
-    def __init__(self, config: dict) -> None:
-        self.host = config['host']
-        self.port = config['port']
-        self.username = config['username']
-        self.private_key = config['private_key']
-        self.connections = config['connections']
-
-    def initialize_pool(self):
-        logging.debug("Initializing pool")
-        # TODO: Implement interface
-        connection_pool = [HostConnection(self.host, self.port, self.username, self.private_key) for _ in range(0, self.connections, 1)]
-        for c in connection_pool:
-            try:
-                c.open_connection()
-            except Exception as e:
-                print("Connection doesn't work. Removing from list")
-                print(e)
-                connection_pool.remove(c)
-
-        if not connection_pool:
-            logging.error("Connection pool is empty  for host %s", self.conf_cfg["host"])
-            return None
-        return connection_pool
-
-
-class LocalCommands:
-    def __init__(self, data_in: Queue, data_out: Queue):
-        self.data_in = data_in
-        self.data_out = data_out
-
-    def check_local_file(self):
-        files = {}
-        while True:
-            try:
-                files = self.data_in.get()
-            except Empty:
-                pass
-
-            if files[0] is None:
-                return
-        # Logic to get file, hash, compare output
-            self.data_out.put({'file': True})
-
-
-class RemoteCommands:
-    """
-       Remote command object.
-       Data queue is used for control data - sizes, hashes
-       Management queue is used for siginalization
-    """
-    def __init__(self, connection: HostConnection, data_in: Queue, data_out: Queue):
-        self.connection = connection
-        self.data_in = data_in
-        self.data_out = data_out
-
-    def calculate_file_hash(self) -> dict:
-        """Calculate hash of file, files are sorted by size"""
-        print("Calculating file hash")
-        files = []
-        while True:
-            try:
-                files = self.data_in.get(block=False, timeout=0.5)
-            except Empty:
-                continue
-
-            if files[0] is None:
-                return
-
-            print("Get from queue")
-            print(files)
-
-            for i in files:
-                print(i)
-            file_paths = ' '.join(files)
-            print("here")
-            print(file_paths)
-
-            cmd = 'md5sum {}'.format(file_paths)
-
-            c = self.connection.open_connection()
-            _, sout, _ = c.exec_command(cmd)
-            checksums_files = sout.readlines()
-            time.sleep(3)
-            print("Checksums")
-            print(checksums_files)
-
-            for checksum_file in checksums_files:
-                # md5sum splits the data by two spaces (Debian10)
-                listed = re.split("  ", checksum_file)
-                checksum = str(listed[0])
-                file = str(listed[1]).rstrip("\n")
-
-                print("Calculate file hash: PUT")
-                self.data_out.put({file: checksum})
-
-    def get_file(self):
-        c = self.connection.open_connection()
-        while True:
-            try:
-                files = self.data_in.get(block=False, timeout=0.2)
-            except Empty:
-                continue
-
-            if files[0] is None:
-                return
-
-            for file in files:
-                print("Get File")
-                self.data_out.put({'file': True})
-
-    def remote_sleep(self, event: Event):
-        print("Remote sleep command")
-        c = self.connection.open_connection()
-        sin, sout, serr = c.exec_command("sleep 1 && echo Up!")
-        out = sout.readlines()
-        time.sleep(1)
-        self.data_queue.put([out])
-        event.set()
-
-    def get_files_and_sizes(self) -> dict:
-        """Find files, get their size return list sorted by size."""
-        print("Remote command get files and sizes")
-        c = self.connection.open_connection()
-
-        files = self.data_in.get()
-        file_paths = ' '.join(files)
-        cmd = 'for i in {} ; do find $i ; done'.format(file_paths)
-        sin, sout, serr = c.exec_command(cmd)
-        out = sout.readlines()
-
-        all_files = ' '.join(out)
-        cmd = 'du {}'.format(all_files)
-        sin, sout, serr = c.exec_command(cmd)
-        sizes_files = sout.readlines()
-
-        print("CMD finished")
-
-        data = {}
-        for size_file in sizes_files:
-            listed = re.split("\t", size_file)
-            size = int(listed[0])
-            file = str(listed[1]).rstrip("\n")
-            data[file] = size
-
-        sorted_by_size = dict(sorted(data.items(), key=lambda x: x[1]))
-        print("Files and sizes: Putting to queue")
-        print(sorted_by_size)
-        self.data_out.put(sorted_by_size)
 
 class ConfigParser:
     def __init__(self, config: dict):
@@ -244,6 +78,187 @@ class ConfigParser:
         return hosts
 
 
+class HostConnection():
+    """Connection object"""
+    def __init__(self, host: str, port: int, username: str, private_key: str) -> None:
+        self.host = host
+        self.port = port
+        self.username = username
+        self.private_key = private_key
+        self.connection = object
+        self.logger = logger()
+
+    def open_connection(self) -> object:
+
+        self.logger.debug("Opening connection to host")
+        self.connection = client.SSHClient()
+        self.connection.set_missing_host_key_policy(client.AutoAddPolicy())
+        try:
+            self.connection.connect(hostname=self.host, username=self.username, port=self.port, key_filename=self.private_key)
+        except Exception as e:
+            self.logger.error(e)
+            return None
+
+        con = self.connection
+        self.logger.debug("opened")
+        return con
+
+    def close_connection(self):
+        self.connection.close()
+
+
+class HostConnectionPool():
+    def __init__(self, config: dict) -> None:
+        self.host = config['host']
+        self.port = config['port']
+        self.username = config['username']
+        self.private_key = config['private_key']
+        self.connections = config['connections']
+
+    def initialize_pool(self):
+        logging.debug("Initializing pool")
+        # TODO: Implement interface
+        connection_pool = [HostConnection(self.host, self.port, self.username, self.private_key) for _ in range(0, self.connections, 1)]
+        for c in connection_pool:
+            try:
+                c.open_connection()
+            except Exception as e:
+                print("Connection doesn't work. Removing from list")
+                print(e)
+                connection_pool.remove(c)
+
+        if not connection_pool:
+            logging.error("Connection pool is empty  for host %s", self.conf_cfg["host"])
+            return None
+        return connection_pool
+
+
+class LocalCommands:
+    def __init__(self, data_in: Queue, data_out: Queue):
+        self.data_in = data_in
+        self.data_out = data_out
+        self.logger = logger()
+
+    def check_local_file(self):
+        files = {}
+        while True:
+            try:
+                files = self.data_in.get()
+            except Empty:
+                pass
+
+            if files[0] is None:
+                return
+        # Logic to get file, hash, compare output
+            self.data_out.put({'file': True})
+
+
+
+class RemoteCommands:
+    """
+       Remote command object.
+       Data queue is used for control data - sizes, hashes
+       Management queue is used for siginalization
+    """
+    def __init__(self, connection: HostConnection, data_in: Queue, data_out: Queue):
+        self.connection = connection
+        self.data_in = data_in
+        self.data_out = data_out
+        self.logger = logger()
+
+    def calculate_file_hash(self) -> dict:
+        """Calculate hash of file, files are sorted by size"""
+        self.logger.info("Calculating file hash")
+        files = []
+        while True:
+            try:
+                files = self.data_in.get(block=False, timeout=0.5)
+            except Empty:
+                continue
+
+            if files[0] is None:
+                return
+
+            self.logger.debug("Get from queue")
+
+            for i in files:
+                print(i)
+            file_paths = ' '.join(files)
+            print("here")
+            print(file_paths)
+
+            cmd = 'md5sum {}'.format(file_paths)
+
+            c = self.connection.open_connection()
+            _, sout, _ = c.exec_command(cmd)
+            checksums_files = sout.readlines()
+            time.sleep(3)
+            self.logger.debug("Checksum gained")
+
+            for checksum_file in checksums_files:
+                # md5sum splits the data by two spaces (Debian10)
+                listed = re.split("  ", checksum_file)
+                checksum = str(listed[0])
+                file = str(listed[1]).rstrip("\n")
+
+                self.logger.debug("Putting data on queue")
+                self.data_out.put({file: checksum})
+
+    def get_file(self):
+        c = self.connection.open_connection()
+
+        while True:
+            try:
+                files = self.data_in.get(block=False, timeout=0.2)
+            except Empty:
+                continue
+
+            if files[0] is None:
+                return
+
+            for file in files:
+                self.logger.info("Downloading file %s", file)
+                self.data_out.put({file: True})
+
+    def remote_sleep(self, event: Event):
+        print("Remote sleep command")
+        c = self.connection.open_connection()
+        sin, sout, serr = c.exec_command("sleep 1 && echo Up!")
+        out = sout.readlines()
+        time.sleep(1)
+        self.data_queue.put([out])
+        event.set()
+
+    def get_files_and_sizes(self) -> dict:
+        """Find files, get their size return list sorted by size."""
+        print("Remote command get files and sizes")
+        c = self.connection.open_connection()
+
+        files = self.data_in.get()
+        file_paths = ' '.join(files)
+        cmd = 'for i in {} ; do find $i ; done'.format(file_paths)
+        sin, sout, serr = c.exec_command(cmd)
+        out = sout.readlines()
+
+        all_files = ' '.join(out)
+        cmd = 'du {}'.format(all_files)
+        sin, sout, serr = c.exec_command(cmd)
+        sizes_files = sout.readlines()
+
+        self.logger.debug("Files and sizes finished")
+
+        data = {}
+        for size_file in sizes_files:
+            listed = re.split("\t", size_file)
+            size = int(listed[0])
+            file = str(listed[1]).rstrip("\n")
+            data[file] = size
+
+        sorted_by_size = dict(sorted(data.items(), key=lambda x: x[1]))
+        self.logger.debug("Files and sizes: Putting to queue")
+        self.data_out.put(sorted_by_size)
+
+
 class Scheduler:
     """
         Take files, syncing option and schedule synchronization subprocesses.
@@ -255,6 +270,7 @@ class Scheduler:
         self.local_files = {}
         self.max_parallel_conns = scheduler_configuration['max_parallel_connections']
         self.hosts = []
+        self.logger = logger()
         self.private_key = str
         self.reload = reload
 
@@ -271,10 +287,11 @@ class Scheduler:
         first_stage_queue_out = Queue()
         second_stage_queue_out = Queue()
         reload_event = Event()
+        result = []
 
         # First stage
         for host in self.hosts:
-            print("Iterating hosts")
+            self.logger.debug("Iterating hosts")
             conn_config = {
                 'host': self.config_parser.get_address(host),
                 'port': self.config_parser.get_port(host),
@@ -295,7 +312,7 @@ class Scheduler:
             files_and_sizes_sorted = remote_command.get_files_and_sizes
             # local_files_and_sizes = remote_command.get_local_files_and_sizes
 
-            print("Check files and sizes")
+            self.logger.debug("Check files and sizes")
             remote_files_processing = Process(target=files_and_sizes_sorted)
             remote_files_processing.start()
             input.put(files)
@@ -306,7 +323,7 @@ class Scheduler:
             if first_stage_counter == len(self.hosts):
                 break
 
-            print("Getting from queue first stage")
+            self.logger.debug("Getting from queue first stage")
             try:
                 files_sizes = first_stage_queue_out.get(block=False, timeout=0.2)
             except Empty:
@@ -314,22 +331,19 @@ class Scheduler:
             else:
                 first_stage_counter += 1
 
-            print("SECOND STAGE")
-            print(files_sizes)
+            result.append(files_sizes)
 
             host_name = list(files_sizes.keys())[0]
 
-            print("Create download list")
+            self.logger.debug("Create download list")
             download_list = []
             for filename, _ in files_sizes.items():
                 download_list.append(filename)
 
-            print(download_list)
-
             global_status[host_name] = {
                 'size_and_files': 'OK',
                 'max_download_tries': 3,
-                'files': download_list,
+                'files': {},
             }
 
             pipeline_queue_in = Queue()
@@ -340,12 +354,11 @@ class Scheduler:
             pipeline_queue_in.put(download_list)
 
         # Consume output of second stage
-        result = []
         res = ""
         while True:
-            print("RUNING MAIN")
+            self.logger.debug("main loop")
             if self.reload.is_set():
-                print("Scheduler reloading")
+                self.logger.info("Scheduler reloading")
                 reload_event.set()
                 pipeline_process.join()
                 return
@@ -373,14 +386,15 @@ class Scheduler:
 
 class Pipeline:
     def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, reload: Event) -> None:
+        self.connections = connections
         self.data_in = data_in
         self.data_out = data_out
         self.host_id = host_id
-        self.connections = connections
+        self.logger = logger()
         self.reload = reload
 
     def command_pipeline(self):
-        print("pipeline is running")
+        self.logger.info("Pipeline launched")
         filenames = self.data_in.get()
         filenames_ok = 0
 
@@ -407,58 +421,57 @@ class Pipeline:
         local_check_command_process.start()
 
         while True:
-            print("RUNING PIPELINE")
+            self.logger.debug("Pipeline loop")
             if self.reload.is_set():
-                print("Pipeline terminating command processes")
+                self.logger.info("Pipeline terminating command processes")
                 checksum_queue_in.put([None])
                 download_queue_in.put([None])
                 local_check_queue_in.put([None])
 
                 return
 
-            print("Check checksum queue")
+            self.logger.debug("Check checksum queue")
             try:
                 file = checksum_queue_out.get(block=False, timeout=0.2)
             except Empty:
-                print("empty")
+                pass
             else:
-                print("Finally")
                 for k, v in file.items():
                     filename = k
                     hash = v
-                print("putting on dload queue")
+                self.data_out.put({filename: hash})
+                self.logger.debug("putting on dload queue")
                 download_queue_in.put([filename])
 
-            print("Checking dload queue")
+            self.logger.debug("Checking dload queue")
             try:
                 dloaded_file = download_queue_out.get(block=False, timeout=0.2)
             except Empty:
-                print("DLOAD QUEUE: empty")
+                pass
             else:
-                print("HERE")
-                print("Putting on check queue")
+                self.logger.debug("Putting on check queue")
                 local_check_queue_in.put([dloaded_file])
 
-            print("Checking finall status")
+            self.logger.debug("Checking finall status")
             try:
                 dload_status = local_check_queue_out.get(block=False, timeout=0.2)
             except Empty:
                 pass
             else:
                 # Implement checks and retries
-                print("Dloaded")
+                self.logger.debug("File downloaded")
                 for filename, ok in dload_status.items():
                     if not ok:
-                        print("File not ok")
+                        self.logger.debug("File is corrupted %s", filename)
                         download_queue_in.put(filename)
                     else:
-                        print("FILE OK")
+                        self.logger.debug("File is ok")
                         filenames_ok += 1
                         self.data_out.put({self.host_id: filename})
 
             if len(filenames) == filenames_ok:
                 # Poison pill
-                print("Poisoning pipeline subprocesses")
+                self.logger.info("Terminating pipeline subprocesses")
                 checksum_queue_in.put([None])
                 download_queue_in.put([None])
                 local_check_queue_in.put([None])
@@ -502,25 +515,18 @@ def main():
             },
         },
     }
-    
+
     # Write config checker
     # Write manager that will receive notifications from config checker and reload scheduler.
+    # Manager shall be accessible through the API (maybe Flask)
     reload_scheduler = Event()
     scheduler = Scheduler(scheduler_configuration=scheduler_config, configuration=config, config_parser=ConfigParser, reload=reload_scheduler)
     schedule = scheduler.run
     process = Process(target=schedule)
     process.start()
-    reload_scheduler.set()
+    #reload_scheduler.set()
     process.join()
     exit()
-
-    config = {}
-    cfg = {}
-    while True:
-        cfg = read_configuration()
-        if cfg != config and cfg != None:
-            config = cfg
-            Scheduler.reload(configuration=config)
 
 
 if __name__ == "__main__":
@@ -529,7 +535,7 @@ if __name__ == "__main__":
                     description = 'What the program does',
                     epilog = 'Text at the bottom of help')
     parser.add_argument('--remote_path', dest='remote_path', help='Local path')
-    parser.add_argument('--private_key', dest='private_key', action='store', help='Private key', required=True) 
+    parser.add_argument('--private_key', dest='private_key', action='store', help='Private key', required=True)
 
     args = parser.parse_args()
 
