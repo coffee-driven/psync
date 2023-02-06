@@ -40,6 +40,16 @@ class ConfigParser:
         except KeyError:
             return None
 
+    def get_connection_config(self, host):
+        config = {
+            'host': self.get_address(host),
+            'port': self.get_port(host),
+            'private_key': self.get_private_key(host),
+            'connections': self.get_connections(host),
+            'username': self.get_username(host),
+            }
+        return config
+
     def get_files(self, host):
         files = list(self.config[host]['files'].keys())
         return files
@@ -282,28 +292,21 @@ class Scheduler:
         pass
 
     def run(self):
+        # TODO convert self.hosts to input from config manager
         global_status = {}
-        first_stage_counter = 0
         first_stage_queue_out = Queue()
         second_stage_queue_out = Queue()
         reload_event = Event()
         result = []
 
-        # First stage
+        # First stage, for each host resolve files and get their size. 
         for host in self.hosts:
-            self.logger.debug("Iterating hosts")
-            conn_config = {
-                'host': self.config_parser.get_address(host),
-                'port': self.config_parser.get_port(host),
-                'private_key': self.config_parser.get_private_key(host),
-                'connections': self.config_parser.get_connections(host),
-                'username': self.config_parser.get_username(host),
-                }
-
-            global_status[host] = {}
+            self.logger.debug("Initializing host %s", host)
+            config = self.config_parser.get_connection_config(host)
             files = self.config_parser.get_files(host)
+            global_status[host] = {}
 
-            host_connection_pool = HostConnectionPool(conn_config)
+            host_connection_pool = HostConnectionPool(config)
             connection_pool = host_connection_pool.initialize_pool()
             connections = [x for x in connection_pool]
 
@@ -317,43 +320,7 @@ class Scheduler:
             remote_files_processing.start()
             input.put(files)
 
-        # Second stage
-        first_stage_counter = 0
-        while True:
-            if first_stage_counter == len(self.hosts):
-                break
-
-            self.logger.debug("Getting from queue first stage")
-            try:
-                files_sizes = first_stage_queue_out.get(block=False, timeout=0.2)
-            except Empty:
-                continue
-            else:
-                first_stage_counter += 1
-
-            result.append(files_sizes)
-
-            host_name = list(files_sizes.keys())[0]
-
-            self.logger.debug("Create download list")
-            download_list = []
-            for filename, _ in files_sizes.items():
-                download_list.append(filename)
-
-            global_status[host_name] = {
-                'size_and_files': 'OK',
-                'max_download_tries': 3,
-                'files': {},
-            }
-
-            pipeline_queue_in = Queue()
-            pipeline = Pipeline(pipeline_queue_in, second_stage_queue_out, host_name, connection_pool, reload_event)
-            command_pipeline = pipeline.command_pipeline
-            pipeline_process = Process(target=command_pipeline)
-            pipeline_process.start()
-            pipeline_queue_in.put(download_list)
-
-        # Consume output of second stage
+        # Second stage. Main loop
         res = ""
         while True:
             self.logger.debug("main loop")
@@ -363,15 +330,46 @@ class Scheduler:
                 pipeline_process.join()
                 return
 
+            # When files for host ready launch a pipeline subprocess
+            self.logger.debug("Getting from queue first stage")
             try:
-                res = second_stage_queue_out.get(timeout=0.3)
+                files_sizes = first_stage_queue_out.get(block=False, timeout=0.3)
+            except Empty:
+                self.logger.debug("Empty")
+            else:
+                result.append(files_sizes)
+
+                host_name = list(files_sizes.keys())[0]
+
+                self.logger.debug("Create download list")
+                download_list = []
+                for filename, _ in files_sizes.items():
+                    download_list.append(filename)
+
+                global_status[host_name] = {
+                    'size_and_files': 'OK',
+                    'max_download_tries': 3,
+                    'files': {},
+                }
+
+                pipeline_queue_in = Queue()
+                pipeline = Pipeline(pipeline_queue_in, second_stage_queue_out, host_name, connection_pool, reload_event)
+                command_pipeline = pipeline.command_pipeline
+                pipeline_process = Process(target=command_pipeline)
+                pipeline_process.start()
+                pipeline_queue_in.put(download_list)
+
+            try:
+                res = second_stage_queue_out.get(block=False, timeout=0.3)
             except Empty:
                 if not pipeline_process.is_alive():
+                    self.logger.debug("Pipeline finished")
                     break
                 time.sleep(0.3)
             else:
                 result.append(res)
 
+        # Last try to get from queue
         while True:
             try:
                 res = second_stage_queue_out.get(timeout=0.3)
@@ -404,7 +402,6 @@ class Pipeline:
         remote_checksum = checksum_command.calculate_file_hash
         remote_checksum_calculation_process = Process(target=remote_checksum)
         remote_checksum_calculation_process.start()
-        checksum_queue_in.put(filenames)
 
         download_queue_in = Queue()
         download_queue_out = Queue()
@@ -420,6 +417,8 @@ class Pipeline:
         local_check_command_process = Process(target=local_command_check_file)
         local_check_command_process.start()
 
+        # Parse outputs, create inputs, control data flow between processes.
+        checksum_queue_in.put(filenames)
         while True:
             self.logger.debug("Pipeline loop")
             if self.reload.is_set():
@@ -430,6 +429,7 @@ class Pipeline:
 
                 return
 
+            # Remote checksum subprocess
             self.logger.debug("Check checksum queue")
             try:
                 file = checksum_queue_out.get(block=False, timeout=0.2)
@@ -443,6 +443,7 @@ class Pipeline:
                 self.logger.debug("putting on dload queue")
                 download_queue_in.put([filename])
 
+            # Download subprocess
             self.logger.debug("Checking dload queue")
             try:
                 dloaded_file = download_queue_out.get(block=False, timeout=0.2)
@@ -452,13 +453,14 @@ class Pipeline:
                 self.logger.debug("Putting on check queue")
                 local_check_queue_in.put([dloaded_file])
 
+            # Local check subprocess
             self.logger.debug("Checking finall status")
             try:
                 dload_status = local_check_queue_out.get(block=False, timeout=0.2)
             except Empty:
                 pass
             else:
-                # Implement checks and retries
+                # TODO Implement checks and retries
                 self.logger.debug("File downloaded")
                 for filename, ok in dload_status.items():
                     if not ok:
@@ -469,6 +471,7 @@ class Pipeline:
                         filenames_ok += 1
                         self.data_out.put({self.host_id: filename})
 
+            # When work done kill all subprocesses
             if len(filenames) == filenames_ok:
                 # Poison pill
                 self.logger.info("Terminating pipeline subprocesses")
@@ -516,9 +519,8 @@ def main():
         },
     }
 
-    # Write config checker
-    # Write manager that will receive notifications from config checker and reload scheduler.
-    # Manager shall be accessible through the API (maybe Flask)
+    # 
+    # 
     reload_scheduler = Event()
     scheduler = Scheduler(scheduler_configuration=scheduler_config, configuration=config, config_parser=ConfigParser, reload=reload_scheduler)
     schedule = scheduler.run
