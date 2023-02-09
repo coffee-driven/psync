@@ -6,6 +6,7 @@ import os
 import re
 import time
 
+from difflib import Differ
 from fabric import Connection
 from paramiko import client
 
@@ -14,12 +15,13 @@ from queue import Empty
 
 
 def logger():
+    logging.basicConfig(filename="/tmp/test.log", filemode='a')
     logger = logging.getLogger()
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     return logger
 
@@ -251,6 +253,7 @@ class RemoteCommands:
         """Find files, get their size return list sorted by size."""
         self.logger.info("cmd get files and sizes launched")
         c = self.connection.open_connection()
+
         while True:
             try:
                 files = self.data_in.get(block=False, timeout=0.3)
@@ -262,24 +265,52 @@ class RemoteCommands:
                     self.logger.info("cmd files and sizes finished")
                     return
 
+                found_files = []
+                not_found_files = []
+                data = {
+                    "found": [],
+                    "not_found": [],
+                }
+
                 file_paths = ' '.join(files)
+                self.logger.debug("FILES %s", file_paths)
                 cmd = 'for i in {} ; do find $i ; done'.format(file_paths)
                 sin, sout, serr = c.exec_command(cmd)
-                out = sout.readlines()
+                sout_lines = sout.readlines()
 
-                all_files = ' '.join(out)
-                cmd = 'du {}'.format(all_files)
+                if not sout_lines:
+                    self.logger.warning("Find didn't find any files")
+                    data["not_found"] = files
+                    self.data_out.put(data)
+                    return
+
+                found_files = [x.strip('\n') for x in sout_lines]
+
+                diff = Differ()
+                diff_res = diff.compare(sorted(found_files), sorted(files))
+                for line in diff_res:
+                    if line[0] == "+":
+                        not_found_file = '-1\t{}'.format(line[2:])
+                        not_found_files.append(not_found_file)
+
+                file_full_paths = ' '.join(found_files)
+                cmd = 'du {}'.format(file_full_paths)
                 sin, sout, serr = c.exec_command(cmd)
                 sizes_files = sout.readlines()
+                
+
+                [sizes_files.append(nf) for nf in not_found_files]
 
                 self.logger.debug("Remote command get files and sizes has finished")
 
-                data = {}
                 for size_file in sizes_files:
                     listed = re.split("\t", size_file)
                     size = int(listed[0])
                     file = str(listed[1]).rstrip("\n")
-                    data[file] = size
+                    if int(size) < 0:
+                        data["not_found"].append((file, size))
+                    else:
+                        data["found"].append((file, size))
 
                 sorted_by_size = dict(sorted(data.items(), key=lambda x: x[1]))
                 self.logger.info("Remote command get files and sizes putting on queue")
@@ -309,12 +340,12 @@ class Scheduler:
     def get_local_files_and_sizes(self):
         pass
 
-    def initialize(self):
-        self.logger.debug("Initializing host %s", self.host)
+    def initialize(self, host):
+        self.logger.debug("Initializing host %s", host)
 
-        config = self.config_parser.get_connection_config(self.host)
-        files = self.config_parser.get_files(self.host)
-        host = self.config_parser.get_address(self.host)
+        config = self.config_parser.get_connection_config(host)
+        files = self.config_parser.get_files(host)
+        host = self.config_parser.get_address(host)
 
         host_connection_pool = HostConnectionPool(config)
         connection_pool = host_connection_pool.initialize_pool()
@@ -327,40 +358,44 @@ class Scheduler:
 
         pipeline_queue_in.put(files)
 
-        while True:
-            self.logger.debug("pipeline subprocess is alive")
-            if not pipeline_process.is_alive():
-                self.logger.debug("pipeline subprocess has finished")
-                return
-            time.sleep(0.2)
+        while pipeline_process.is_alive():
+            self.logger.debug("Waiting for pipeline")
+            time.sleep(0.5)
+        return
 
+    # TODO convert self.hosts to input from config manager
     def run(self):
-        # TODO convert self.hosts to input from config manager
         reload_event = Event()
         result = []
+        pipelines = []
 
-        # First stage, for each host resolve files and get their size.
-        for self.host in self.hosts:
-            # pipeline = Init(host, reload_event, self.config_parser, self.pipeline_out)
-            pipeline = self.initialize
-            pipeline_process = Process(target=pipeline)
-            pipeline_process.start()
-
-        # Second stage. Main loop
-        res = ""
-        while True:
-            self.logger.debug("main loop")
+        # Launch command pipeline for each host
+        for host in self.hosts:
+            finish = Event()
+            init_pipeline = self.initialize
+            init_pipeline_process = Process(target=init_pipeline, args=(host,))
+            init_pipeline_process.start()
+            pipelines.append(init_pipeline_process)
+        
+        # Process pipelines output
+        out = ""
+        while pipelines:
+            self.logger.info("main")
 
             try:
-                res = self.pipeline_out.get(block=False, timeout=0.3)
+                out = self.pipeline_out.get(block=False, timeout=0.3)
             except Empty:
-                if not pipeline_process.is_alive():
-                    self.logger.debug("Pipeline finished")
-                    break
-                time.sleep(0.3)
+                self.logger.debug("Pipeline queue is empty")
+                
+                for pipeline in pipelines:
+                    if not pipeline.is_alive():
+                        self.logger.info("Pipeline finished. %s", pipeline)
+                        pipelines.remove(pipeline)
+
+                time.sleep(0.5)
             else:
-                result.append(res)
-                time.sleep(0.3)
+                result.append(out)
+                time.sleep(0.5)
 
             if self.reload.is_set():
                 self.logger.info("Scheduler reloading")
@@ -368,6 +403,8 @@ class Scheduler:
                 pipeline_process.join()
 
                 return
+
+        self.logger.info("All pipelines finished")
 
         # Last try to get from queue
         while True:
@@ -383,6 +420,7 @@ class Scheduler:
 
 class Pipeline:
     def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, reload: Event) -> None:
+        Process.__init__(self)
         self.connections = connections
         self.data_in = data_in
         self.data_out = data_out
@@ -390,10 +428,9 @@ class Pipeline:
         self.logger = logger()
         self.reload = reload
 
+
     def command_pipeline(self):
         self.logger.info("Pipeline launched")
-        files = self.data_in.get()
-        filenames_ok = 0
 
         files_and_sizes_queue_in = Queue()
         files_and_sizes_queue_out = Queue()
@@ -424,18 +461,27 @@ class Pipeline:
         local_check_command_process = Process(target=local_command_check_file)
         local_check_command_process.start()
 
-
-        # Parse outputs, create inputs, control data flow between processes.
+        files = self.data_in.get()
         files_and_sizes_queue_in.put(files)
-        download_list = []
+        files_ok = 0
+
+        queues = [files_and_sizes_queue_in,
+                  checksum_queue_in,
+                  download_queue_in,
+                  local_check_queue_in,
+                 ]
+
+        commands = [remote_files_processing,
+                    remote_checksum_calculation_process,
+                    get_file_process,
+                    local_check_command_process
+                   ]
+
         while True:
             self.logger.debug("Pipeline loop")
             if self.reload.is_set():
                 self.logger.info("RELOAD - Pipeline terminating command processes")
-                checksum_queue_in.put([None])
-                download_queue_in.put([None])
-                local_check_queue_in.put([None])
-
+                _ = [q.put([None])for q in queues]
                 return
 
             # Files and sizes
@@ -445,12 +491,25 @@ class Pipeline:
             except Empty:
                 pass
             else:
-                self.logger.debug("Create download list")
+                if not f["found"]:
+                    self.logger.warning("Found no files to backup")
+                    _ = [q.put([None])for q in queues]
+                    _ = [q.close() for q in queues]
+                    _ = [q.join_thread() for q in queues]
+                    _ = [c.terminate() for c in commands]
+                    self.logger.info("%s - Pipeline finished", self.host_id)
+                    return
+
+                self.logger.debug("Creating download list")
                 download_list = []
-                for filename, _ in f.items():
-                    download_list.append(filename)
-                self.logger.debug("putting on checksum queue")
-                checksum_queue_in.put(download_list)
+
+                for file_size in f["found"]:
+                    download_list.append(file_size[0])
+                    self.logger.debug("putting on checksum queue")
+                    checksum_queue_in.put(download_list)
+                
+                for file_size in f["not_found"]:
+                    self.logger.error("File not found %s", file_size[0])
 
             # Remote checksum subprocess
             self.logger.debug("Check checksum queue")
@@ -459,7 +518,6 @@ class Pipeline:
             except Empty:
                 pass
             else:
-                print('{} - {}'.format("CHECKSUM", file))
                 for k, v in file.items():
                     filename = k
                     hash = v
@@ -478,7 +536,7 @@ class Pipeline:
                 local_check_queue_in.put([dloaded_file])
 
             # Local check subprocess
-            self.logger.debug("Checking finall status")
+            self.logger.debug("Checking final status")
             try:
                 dload_status = local_check_queue_out.get(block=False, timeout=0.2)
             except Empty:
@@ -492,17 +550,15 @@ class Pipeline:
                         download_queue_in.put(filename)
                     else:
                         self.logger.debug("File is ok")
-                        filenames_ok += 1
+                        files_ok += 1
                         self.data_out.put({self.host_id: filename})
 
-                # When work done kill all subprocesses
-                if int(len(download_list)) == int(filenames_ok):
+                # Finish: kill all subprocesses
+                if int(len(download_list)) == int(files_ok):
                     # Poison pill
                     self.logger.info("Terminating pipeline subprocesses")
-                    files_and_sizes_queue_in.put([None])
-                    checksum_queue_in.put([None])
-                    download_queue_in.put([None])
-                    local_check_queue_in.put([None])
+                    _ = [q.put([None])for q in queues]
+                    self.logger.info("poisoned")
 
                     local_check_command_process.join()
                     self.logger.debug("local check command subprocess finished")
@@ -516,12 +572,13 @@ class Pipeline:
                     remote_files_processing.join()
                     self.logger.debug("remote file processing subprocess finished")
 
-                    self.logger.info("Pipeline finished")
+                    _ = [q.close() for q in queues]
+                    _ = [q.join_thread() for q in queues]
+                    self.logger.debug("All queues closed")
+                    self.logger.info("%s - Pipeline finished", self.host_id)
+                    return
 
-                    break
-            time.sleep(0.2)
-
-        return
+                time.sleep(0.2)
 
 def main():
 
@@ -542,10 +599,14 @@ def main():
                     "sync_options": "options",
                     "local_path": "local_path"
                 },
+                "/home/myfile": {
+                    "sync_options": "options",
+                    "local_path": "local_path",
+                },
             },
         },
         "vm2": {
-            "host": "127.0.0.1",
+            "host": "127.0.0.2",
             "port": 2022,
             "username": "bob",
             "private_key": args.private_key,
