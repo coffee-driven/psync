@@ -3,7 +3,7 @@ from psync import psync
 
 
 def test_con():
-    host_connection = psync.HostConnection('127.0.0.1', 2022, "bob", "/home/m/Documents/GitHub/psync/priv")
+    host_connection = psync.HostConnection('127.0.0.1', 2022, "bob", "/home/m/Documents/GitHub/psync/docker/priv")
     assert isinstance(host_connection.open_connection(), Connection)
 
 def test_con_pool_init():
