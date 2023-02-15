@@ -22,7 +22,7 @@ def logger():
     formatter = logging.Formatter('%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.ERROR)
 
     return logger
 
@@ -104,6 +104,15 @@ class HostConnection():
     def open_connection(self) -> object:
 
         self.logger.debug("Opening connection to host")
+        self.connection = Connection(host=self.host,
+                                     user=self.username,
+                                     port=self.port,
+                                     connect_kwargs={"key_filename": self.private_key,},)
+        self.connection.open()
+        
+        con = self.connection
+        return con
+        """
         self.connection = client.SSHClient()
         self.connection.set_missing_host_key_policy(client.AutoAddPolicy())
         try:
@@ -115,7 +124,7 @@ class HostConnection():
         con = self.connection
         self.logger.debug("opened")
         return con
-
+        """
     def close_connection(self):
         self.connection.close()
 
@@ -140,9 +149,11 @@ class HostConnectionPool():
                 print("Connection doesn't work. Removing from list")
                 print(e)
                 connection_pool.remove(c)
+            else:
+                c.close_connection()
 
         if not connection_pool:
-            self.logging.error("Connection pool is empty  for host %s", self.conf_cfg["host"])
+            self.logging.error("Connection pool is empty for host %s", self.conf_cfg["host"])
             return None
         return connection_pool
 
@@ -196,15 +207,12 @@ class RemoteCommands:
             except Empty:
                 continue
             if files[0] is None:
-                self.logger.info("cmd calculate file hash finished")
+                self.logger.info("cmd calculate file hash been terminated")
                 return
 
             self.logger.debug("received item from queue")
 
-            for i in files:
-                print(i)
             file_paths = ' '.join(files)
-
             cmd = 'md5sum {}'.format(file_paths)
 
             c = self.connection.open_connection()
@@ -474,7 +482,6 @@ class Pipeline:
         get_remote_file_process = Process(target=get_remote_file_command)
         get_remote_file_process.start()
         self.logger.debug("downloading launched")
-
 
         local_check_queue_in = Queue()
         local_check_queue_out = Queue()
