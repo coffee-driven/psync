@@ -201,6 +201,8 @@ class RemoteCommands:
         """Calculate hash of file, files are sorted by size"""
         self.logger.info("cmd calculate file hash launched")
         files = []
+        c = self.connection.open_connection()
+
         while True:
             try:
                 files = self.data_in.get(block=False, timeout=0.5)
@@ -213,12 +215,11 @@ class RemoteCommands:
             self.logger.debug("received item from queue")
 
             file_paths = ' '.join(files)
-            cmd = 'md5sum {}'.format(file_paths)
+            shell_cmd = 'md5sum {}'.format(file_paths)
 
-            c = self.connection.open_connection()
-            _, sout, _ = c.exec_command(cmd)
-            checksums_files = sout.readlines()
-            time.sleep(1)
+            cmd = c.run(shell_cmd)
+            cmd_out = cmd.stdout
+
             self.logger.debug("Checksum gained")
 
             for checksum_file in checksums_files:
@@ -248,18 +249,31 @@ class RemoteCommands:
                 self.logger.info("cmd get file downloading file %s", file)
                 self.data_out.put({file: True})
 
-    def remote_sleep(self, event: Event):
-        self.logger.info("cmd remote sleel launched")
+    def remote_sleep(self, sleep_time: int):
+        self.logger.info("cmd remote sleep launched")
         c = self.connection.open_connection()
-
-        sin, sout, serr = c.exec_command("sleep 1 && echo Up!")
         
-        out = sout.readlines()
-        time.sleep(1)
+        shell_cmd = "sleep {} && echo Up!".format(sleep_time)
+        cmd = c.run(shell_cmd)
+        cmd_out = cmd.stdout
         
         self.logger.info("cmd remote command putting on queue")
         self.data_queue.put([out])
-        event.set()
+
+    @staticmethod
+    def parse_files_and_sizes(sizes_and_files: list) -> dict:
+        """
+            This method takes care of parsing the output from remote commands. It's separated because there might be multiple variations
+            of output format eq. space separated, tab separated, etc..
+        """
+        res = {}
+
+        separator = '\t' # this might be converted to function that identify the separator
+        for record in sizes_and_files:
+            size_file = record.split(separator)
+            res[size_file[1]] = int(size_file[0])
+        
+        return res
 
     def get_files_and_sizes(self) -> dict:
         """Find files, get their size return list sorted by size."""
@@ -278,54 +292,60 @@ class RemoteCommands:
                     return
 
                 found_files = []
-                not_found_files = []
                 data = {
-                    "found": [],
-                    "not_found": [],
+                    "found": {},
+                    "not_found": {},
                 }
 
                 file_paths = ' '.join(files)
                 self.logger.debug("FILES %s", file_paths)
-                cmd = 'for i in {} ; do find $i ; done'.format(file_paths)
-                sin, sout, serr = c.exec_command(cmd)
-                sout_lines = sout.readlines()
+                
+                shell_cmd = '''for file in {} ; do
+                           if [ -f $file ] ; then
+                               printf '%s\n' "$(du $file)"
+                           elif [ -d $file ] ; then
+                               find $file -type f -exec du {{}} \;
+                           else
+                               printf '%s' ""
+                           fi
+                          done'''.format(file_paths)
 
-                if not sout_lines:
+                try:
+                    cmd = c.run(shell_cmd)
+                except Exception as e:
+                    self.logger.error("file sizes %s", e)
+                else:
+                    cmd_out = cmd.stdout
+                    splitted_result = cmd_out.split('\n')
+                    found_files = [x for x in splitted_result if x != '']
+                    print(found_files)
+
+                if not found_files:
                     self.logger.warning("Find didn't find any files")
                     data["not_found"] = files
                     self.data_out.put(data)
                     return
-
-                found_files = [x.strip('\n') for x in sout_lines]
+                
+                files_sizes_dict = self.parse_files_and_sizes(found_files)
+                found_filenames = list(files_sizes_dict.keys())
 
                 diff = Differ()
-                diff_res = diff.compare(sorted(found_files), sorted(files))
+                diff_res = diff.compare(sorted(found_filenames), sorted(files))
                 for line in diff_res:
                     if line[0] == "+":
-                        not_found_file = '-1\t{}'.format(line[2:])
-                        not_found_files.append(not_found_file)
+                        name = str(line[2:])
+                        data["not_found"][name] = -1
 
-                file_full_paths = ' '.join(found_files)
-                cmd = 'du {}'.format(file_full_paths)
-                sin, sout, serr = c.exec_command(cmd)
-                sizes_files = sout.readlines()
-
-                [sizes_files.append(nf) for nf in not_found_files]
+                sorted_by_size = dict(sorted(files_sizes_dict.items(), key=lambda x: x[1]))
+                data["found"] = sorted_by_size
 
                 self.logger.debug("Remote command get files and sizes has finished")
-
-                for size_file in sizes_files:
-                    listed = re.split("\t", size_file)
-                    size = int(listed[0])
-                    file = str(listed[1]).rstrip("\n")
-                    if int(size) < 0:
-                        data["not_found"].append((file, size))
-                    else:
-                        data["found"].append((file, size))
-
-                sorted_by_size = dict(sorted(data.items(), key=lambda x: x[1]))
                 self.logger.info("Remote command get files and sizes putting on queue")
-                self.data_out.put(sorted_by_size)
+
+                print("DATA")
+                print(data)
+
+                self.data_out.put(data)
 
 
 # TODO convert self.hosts to input from config manager
@@ -648,6 +668,10 @@ def main():
                     "sync_options": "options",
                     "local_path": "local_path",
                 },
+                "/home/absent_file": {
+                    "sync_options": "options",
+                    "local_path": "local_path",
+                }
             },
         },
         "vm2": {
