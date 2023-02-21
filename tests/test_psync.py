@@ -85,17 +85,38 @@ def test_file_download():
         assert v is True
 
 def test_local_check():
-    test_data = ["/tmp/testfile"]
+    test_data = ("/home/testfile", "/tmp")
     q_in = Queue()
     q_out = Queue()
     cmd = psync.LocalCommands(data_in=q_in, data_out=q_out)
     p = Process(target=cmd.get_local_checksum)
 
     p.start()
-    q_in.put(test_data)
+    q_in.put([test_data])
     res = q_out.get(timeout=5)
     p.terminate()
 
     for k, v in res.items():
-        assert k == "/tmp/testfile"
-        assert v == "b064a020db8018f18ff5ae367d01b212"
+        assert v["local_path"] == "/tmp/home/testfile"
+        assert v["checksum"] == "b026324c6904b2a9cb4b88d6d61c81d1"
+
+def test_get_files_local_path():
+    cfg = {"vm2": {
+            "host": "127.0.0.2",
+            "port": 2022,
+            "username": "bob",
+            "private_key": "",
+            "default_storage": "/tmp",
+            "connections": 3,
+            "files": {
+                "/home/testfile2": {
+                    "sync_options": "options",
+                    "local_path": "/storage"
+                },},},}
+    
+    test_data = "/home/testfile2"
+    
+    config_parser = psync.ConfigParser(cfg)
+    local_store = config_parser.get_files_local_storage("vm2", test_data)
+
+    assert local_store == "/storage"

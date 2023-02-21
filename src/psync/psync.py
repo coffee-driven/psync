@@ -57,6 +57,10 @@ class ConfigParser:
         files = list(self.config[host]['files'].keys())
         return files
 
+    def get_files_local_storage(self, host, path):
+        local_storage = str(self.config[host]["files"][path]["local_path"])
+        return local_storage
+
     def get_port(self, host):
         try:
             port = self.config[host]['port']
@@ -146,8 +150,7 @@ class HostConnectionPool():
             try:
                 c.open_connection()
             except Exception as e:
-                print("Connection doesn't work. Removing from list")
-                print(e)
+                self.logger.error("Connection doesn't work. Removing from list %s", e)
                 connection_pool.remove(c)
             else:
                 c.close_connection()
@@ -184,14 +187,20 @@ class LocalCommands:
                     data = []
                     hasher = hashlib.md5()
 
-                    with open(file, 'rb') as f:
+                    remote_path, local_store = file
+                    local_path = "{}{}".format(local_store, remote_path)
+
+                    with open(local_path, 'rb') as f:
                         data = f.readlines()
 
                     hasher.update(data[0])
                     checksum = hasher.hexdigest()
 
                     self.logger.info("cmd get local checksum putting on queue %s", file)
-                    self.data_out.put({file: checksum})
+                    self.data_out.put({remote_path: { "local_path": local_path, "checksum": checksum},},)
+
+    def get_local_files(self):
+        pass
 
 
 class RemoteCommands:
@@ -332,7 +341,6 @@ class RemoteCommands:
                     cmd_out = cmd.stdout
                     splitted_result = cmd_out.split('\n')
                     found_files = [x for x in splitted_result if x != '']
-                    print(found_files)
 
                 if not found_files:
                     self.logger.warning("Find didn't find any files")
@@ -385,13 +393,13 @@ class Scheduler:
 
         config = self.config_parser.get_connection_config(host)
         files = self.config_parser.get_files(host)
-        host = self.config_parser.get_address(host)
+        # host = self.config_parser.get_address(host)
 
         host_connection_pool = HostConnectionPool(config)
         connection_pool = host_connection_pool.initialize_pool()
 
         pipeline_queue_in = Queue()
-        pipeline = Pipeline(pipeline_queue_in, self.pipeline_out, host, connection_pool, self.reload)
+        pipeline = Pipeline(pipeline_queue_in, self.pipeline_out, host, connection_pool, self.reload, self.config_parser)
         command_pipeline = pipeline.command_pipeline
         pipeline_process = Process(target=command_pipeline)
         pipeline_process.start()
@@ -459,13 +467,14 @@ class Scheduler:
             result_dict[i] = r
 
         result_json = json.dumps(result_dict, indent = 1)
-        print(result_json)
 
+        print(result_json)
         return
 
 class Pipeline:
-    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, reload: Event) -> None:
+    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, reload: Event, config_parser) -> None:
         Process.__init__(self)
+        self.config_parser = config_parser
         self.connections = connections
         self.data_in = data_in
         self.data_out = data_out
@@ -541,7 +550,6 @@ class Pipeline:
 
         while True:
             self.logger.debug("Pipeline loop")
-            print("run")
 
             if self.reload.is_set():
                 self.logger.info("RELOAD - Pipeline terminating command processes")
@@ -580,7 +588,6 @@ class Pipeline:
 
             # Stage remote checksum subprocess
             self.logger.debug("Checking checksum queue")
-            print("checksum")
             try:
                 filename_checksum = checksum_queue_out.get(block=True, timeout=0.1)
             except Empty:
@@ -591,38 +598,42 @@ class Pipeline:
                     filename = k
                     checksum = v
 
-                self.status["files"][filename]["checksum"] = checksum
-                
-                self.logger.debug("putting on dload queue")
-                download_queue_in.put([filename])
+                    self.status["files"][filename]["checksum"] = checksum
+
+                    storage = self.config_parser.get_files_local_storage(self.host_id, filename)
+                    download_data = (filename, storage)
+
+                    self.logger.debug("putting on dload queue")
+                    download_queue_in.put([download_data])
 
             # TODO Filter files that are present and actual, download only missing files
 
             # Stage download subprocess
-            # TODO create proper local file path
             self.logger.debug("Checking dload queue")
             try:
                 dloaded_file = download_queue_out.get(block=True, timeout=0.2)
             except Empty:
                 pass
             else:
-                self.logger.debug("Putting on check queue")
-                print("CHECK Q")
                 for k, v in dloaded_file.items():
-                    local_check_queue_in.put([k])
+                    local_path = self.config_parser.get_files_local_storage(self.host_id, k)
+                    # local_store = "{}{}".format(local_path, k)
+                    data = (k, local_path)
+
+                    self.logger.debug("Putting on check queue")
+                    local_check_queue_in.put([data])
 
             # Stage local check subprocess
             self.logger.debug("Checking final status")
             try:
-                dload_status = local_check_queue_out.get(block=True, timeout=0.2)
+                local_check_status = local_check_queue_out.get(block=True, timeout=0.2)
             except Empty:
                 pass
             else:
-                print("local check")
                 # TODO Implement checks and retries
                 self.logger.debug("File downloaded")
-                for filename, ok in dload_status.items():
-                    if not ok:
+                for filename, status in local_check_status.items():
+                    if not status:
                         self.logger.debug("File is corrupted %s", filename)
                         download_queue_in.put([filename])
                         self.status["files"][filename]["state"] = "corrupted"
@@ -632,9 +643,7 @@ class Pipeline:
                         self.status["files"][filename]["state"] = "synced"
 
                 # Finish: kill all subprocesses
-                print(self.status)
                 if int(len(download_list)) == int(files_ok):
-                    print("FINISH")
                     self.logger.info("Terminating pipeline subprocesses")
                     # Poison pill
                     _ = [q.put([None])for q in queues]
@@ -661,7 +670,6 @@ class Pipeline:
                     self.logger.info("%s - Pipeline has finished", self.host_id)
 
                     return
-                print("END")
                 time.sleep(0.2)
 
 def main():
@@ -681,15 +689,15 @@ def main():
             "files": {
                 "/home/testfile": {
                     "sync_options": "options",
-                    "local_path": "local_path"
+                    "local_path": "/tmp"
                 },
                 "/home/myfile": {
                     "sync_options": "options",
-                    "local_path": "local_path",
+                    "local_path": "/tmp",
                 },
                 "/home/absent_file": {
                     "sync_options": "options",
-                    "local_path": "local_path",
+                    "local_path": "/tmp",
                 }
             },
         },
@@ -703,7 +711,7 @@ def main():
             "files": {
                 "/home/testfile2": {
                     "sync_options": "options",
-                    "local_path": "local_path"
+                    "local_path": "/tmp"
                 },
             },
         },
