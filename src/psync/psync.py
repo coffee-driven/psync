@@ -164,25 +164,34 @@ class LocalCommands:
         self.data_out = data_out
         self.logger = logger()
 
-    def check_local_file(self):
+    def get_local_checksum(self):
+        
+        import hashlib
+
         self.logger.info("cmd check local file launched")
-        files = {}
+        files = []
         while True:
             try:
-                files = self.data_in.get()
+                files = self.data_in.get(block=True, timeout=0.3)
             except Empty:
-                pass
+                continue
+            else:
+                if files[0] is None:
+                    self.logger.info("cmd check local file finished")
+                    return
+        
+                for file in files:
+                    data = []
+                    hasher = hashlib.md5()
 
-            if files[0] is None:
-                self.logger.info("cmd check local file finished")
-                return
-        # Logic to get file, hash, compare output
-            self.logger.info("cmd check local file putting on queue")
-            self.data_out.put({'file': True})
+                    with open(file, 'rb') as f:
+                        data = f.readlines()
 
-    def get_local_files(self):
-        pass
+                    hasher.update(data[0])
+                    checksum = hasher.hexdigest()
 
+                    self.logger.info("cmd get local checksum putting on queue %s", file)
+                    self.data_out.put({file: checksum})
 
 
 class RemoteCommands:
@@ -198,7 +207,7 @@ class RemoteCommands:
         self.logger = logger()
 
     def calculate_file_hash(self) -> dict:
-        """Calculate hash of file, files are sorted by size"""
+        """Calculate hash of file"""
         self.logger.info("cmd calculate file hash launched")
         files = []
         c = self.connection.open_connection()
@@ -213,27 +222,29 @@ class RemoteCommands:
                 return
 
             self.logger.debug("received item from queue")
+            
+            # Batch of files 
+            # file_paths = ' '.join(files)
+            # shell_cmd = 'md5sum {}'.format(file_paths)
 
-            file_paths = ' '.join(files)
-            shell_cmd = 'md5sum {}'.format(file_paths)
+            for file in files:
+                shell_cmd = 'md5sum {}'.format(file)
+                cmd = c.run(shell_cmd)
+                cmd_out = cmd.stdout
 
-            cmd = c.run(shell_cmd)
-            cmd_out = cmd.stdout
-
-            self.logger.debug("Checksum gained")
-
-            for checksum_file in checksums_files:
                 # md5sum splits the data by two spaces (Debian10)
-                listed = re.split("  ", checksum_file)
-                checksum = str(listed[0])
-                file = str(listed[1]).rstrip("\n")
-
+                checksum, _filename = re.split("  ", cmd_out)
+                filename = _filename.rstrip('\n')
+                
+                self.logger.debug("Checksum gained for %s", filename)
+    
                 self.logger.info("cmd calculate file putting on queue")
-                self.data_out.put({file: checksum})
+                self.data_out.put({filename: checksum})
 
     def get_file(self):
         self.logger.info("cmd get file launched")
         c = self.connection.open_connection()
+        files = ()
 
         while True:
             try:
@@ -246,8 +257,11 @@ class RemoteCommands:
                 return
 
             for file in files:
-                self.logger.info("cmd get file downloading file %s", file)
-                self.data_out.put({file: True})
+                remote_path, local_path = file
+                local_store = "{}/{}".format(local_path, remote_path)
+                c.get(remote_path, local_store, False)
+                self.logger.info("cmd get file downloading file %s to %s", remote_path, local_path)
+                self.data_out.put({remote_path: True})
 
     def remote_sleep(self, sleep_time: int):
         self.logger.info("cmd remote sleep launched")
@@ -341,9 +355,6 @@ class RemoteCommands:
 
                 self.logger.debug("Remote command get files and sizes has finished")
                 self.logger.info("Remote command get files and sizes putting on queue")
-
-                print("DATA")
-                print(data)
 
                 self.data_out.put(data)
 
@@ -506,7 +517,7 @@ class Pipeline:
         local_check_queue_in = Queue()
         local_check_queue_out = Queue()
         check_dloaded_file_checksum = LocalCommands(data_in=local_check_queue_in, data_out=local_check_queue_out)
-        check_dloaded_file_checksum_command = check_dloaded_file_checksum.check_local_file
+        check_dloaded_file_checksum_command = check_dloaded_file_checksum.get_local_checksum
         check_dloaded_file_checksum_process = Process(target=check_dloaded_file_checksum_command)
         check_dloaded_file_checksum_process.start()
         self.logger.debug("local check of downloaded files launched")
@@ -530,6 +541,7 @@ class Pipeline:
 
         while True:
             self.logger.debug("Pipeline loop")
+            print("run")
 
             if self.reload.is_set():
                 self.logger.info("RELOAD - Pipeline terminating command processes")
@@ -554,38 +566,40 @@ class Pipeline:
 
                 self.logger.debug("Creating download list")
                 download_list = []
-                for file_size in remote_files_sizes["found"]:
-                    download_list.append(file_size[0])
-                    self.status["files"][file_size[0]] = {}
-                    self.status["files"][file_size[0]]["size"] = file_size[1]
+                for filename, size in remote_files_sizes["found"].items():
+                    download_list.append(filename)
+                    self.status["files"][filename] = {}
+                    self.status["files"][filename]["size"] = size
 
-                    self.logger.debug("putting on checksum queue %s", file_size[0])
+                    self.logger.debug("putting on checksum queue %s", filename)
                     checksum_queue_in.put(download_list)
-                
-                for file_size in remote_files_sizes["not_found"]:
-                    self.logger.error("File not found %s", file_size[0])
+
+
+                for filename, size in remote_files_sizes["not_found"].items():
+                    self.logger.error("File not found %s", filename)
 
             # Stage remote checksum subprocess
             self.logger.debug("Checking checksum queue")
+            print("checksum")
             try:
-                file = checksum_queue_out.get(block=True, timeout=0.1)
+                filename_checksum = checksum_queue_out.get(block=True, timeout=0.1)
             except Empty:
                 pass
             else:
                 self.logger.debug("Processing output from checksum queue")
-                for k, v in file.items():
+                for k, v in filename_checksum.items():
                     filename = k
-                    hash = v
+                    checksum = v
 
-                self.status["files"][filename]["hash"] = hash
+                self.status["files"][filename]["checksum"] = checksum
                 
                 self.logger.debug("putting on dload queue")
                 download_queue_in.put([filename])
 
             # TODO Filter files that are present and actual, download only missing files
 
-
             # Stage download subprocess
+            # TODO create proper local file path
             self.logger.debug("Checking dload queue")
             try:
                 dloaded_file = download_queue_out.get(block=True, timeout=0.2)
@@ -593,7 +607,9 @@ class Pipeline:
                 pass
             else:
                 self.logger.debug("Putting on check queue")
-                local_check_queue_in.put([dloaded_file])
+                print("CHECK Q")
+                for k, v in dloaded_file.items():
+                    local_check_queue_in.put([k])
 
             # Stage local check subprocess
             self.logger.debug("Checking final status")
@@ -602,20 +618,23 @@ class Pipeline:
             except Empty:
                 pass
             else:
+                print("local check")
                 # TODO Implement checks and retries
                 self.logger.debug("File downloaded")
                 for filename, ok in dload_status.items():
                     if not ok:
                         self.logger.debug("File is corrupted %s", filename)
-                        download_queue_in.put(filename)
-                        self.status["files"][file_size[0]]["state"] = "corrupted"
+                        download_queue_in.put([filename])
+                        self.status["files"][filename]["state"] = "corrupted"
                     else:
                         self.logger.debug("File is ok")
                         files_ok += 1
-                        self.status["files"][file_size[0]]["state"] = "synced"
+                        self.status["files"][filename]["state"] = "synced"
 
                 # Finish: kill all subprocesses
+                print(self.status)
                 if int(len(download_list)) == int(files_ok):
+                    print("FINISH")
                     self.logger.info("Terminating pipeline subprocesses")
                     # Poison pill
                     _ = [q.put([None])for q in queues]
@@ -642,7 +661,7 @@ class Pipeline:
                     self.logger.info("%s - Pipeline has finished", self.host_id)
 
                     return
-
+                print("END")
                 time.sleep(0.2)
 
 def main():
