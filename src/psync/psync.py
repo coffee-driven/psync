@@ -584,6 +584,11 @@ class Pipeline:
 
 
                 for filename, size in remote_files_sizes["not_found"].items():
+                    self.status["files"][filename] = {"size": 0,
+                                                      "checksum": None,
+                                                      "state": "missing",
+                                                     }
+
                     self.logger.error("File not found %s", filename)
 
             # Stage remote checksum subprocess
