@@ -29,8 +29,11 @@ def main():
     with open(args.config, "r") as jsonfile:
         config = json.load(jsonfile)
 
+    configurator = ConfigParser(config)
+    configurator.validate()
+
     final_result_queue = Queue()
-    scheduler = Scheduler(configuration=config, result_queue=final_result_queue)
+    scheduler = Scheduler(config_parser=configurator, result_queue=final_result_queue)
     cmd = scheduler.run
     process = Process(target=cmd)
     process.run()

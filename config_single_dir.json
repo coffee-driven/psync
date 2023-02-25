@@ -6,9 +6,6 @@
         "storage": "/tmp",
         "connections": 3,
         "options": "",
-        "files": {
-                "/home/my_dir": {
-                }
-            }
+        "files": ["/home/my_dir"]
         }
 }

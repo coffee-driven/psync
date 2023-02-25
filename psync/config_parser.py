@@ -1,10 +1,41 @@
+import logging
+
+
+def logger():
+    logger = logging.getLogger()
+    return logger
+
+
 class ConfigParser:
     def __init__(self, config: dict):
         self.config = config
+        self.logger = logger()
 
         self.default_port = 22
         self.default_connections = 3
         self.default_username = 'psync'
+
+    def validate(self):
+        mandatory_params = { "files": list,
+                             "host": str,
+                             "private_key": str,
+                             "username": str,
+                             "storage": str}
+
+        for host_conf in self.config.values():
+            self.__validator(host_conf, mandatory_params)
+
+    def __validator(self, config, params) -> None:
+        for key, type in params.items():
+            try:
+                val = config[key]
+            except KeyError:
+                self.logger.error("Configuration error. Missing configuration option: %s", key)
+                exit(1)
+            else:
+                if not isinstance(val, type):
+                    self.logger.error("Configuration error. Wrong value type for option: %s", val)
+                    exit(1)
 
     def get_address(self, host):
         try:
@@ -25,7 +56,7 @@ class ConfigParser:
         return config
 
     def get_files(self, host):
-        files = list(self.config[host]['files'].keys())
+        files = list(self.config[host]["files"])
         return files
 
     def get_files_local_storage(self, host, path):

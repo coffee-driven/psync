@@ -3,39 +3,17 @@
         "port": 2022,
         "username": "bob",
         "private_key": "docker/priv",
-        "default_storage": "/tmp",
+        "storage": "/tmp",
         "connections": 3,
-        "files": {
-                "/home/testfile": {
-                    "sync_options": "options",
-                    "local_path": "/tmp"
-                },
-                "/home/myfile": {
-                    "sync_options": "options",
-                    "local_path": "/tmp"
-                },
-                "/home/absent_file": {
-                    "sync_options": "options",
-                    "local_path": "/tmp"
-                }
-            }
+        "files": ["/home/testfile", "/home/myfile", "/home/absent_file" ]
         },
     "vm2": {
         "host": "127.0.0.2",
         "port": 2022,
         "username": "bob",
         "private_key": "docker/priv",
-        "default_storage": "/tmp",
+        "storage": "/tmp",
         "connections": 3,
-        "files": {
-            "/home/testfile2": {
-                "sync_options": "options",
-                "local_path": "/tmp"
-            },
-            "/home/my_dir": {
-                "sync_options": "options" ,
-                "local_path": "/tmp"
-            }
+        "files": ["/home/testfile2", "/home/my_dir"]
         }
-    }
 }

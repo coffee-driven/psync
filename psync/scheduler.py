@@ -20,8 +20,7 @@ class Scheduler:
     """
         Take files, syncing option and schedule synchronization subprocesses.
     """
-    def __init__(self, configuration: dict, result_queue: Queue) -> None:
-        self.config = configuration
+    def __init__(self, config_parser, result_queue: Queue) -> None:
         self.connection_pool = {}
         self.remote_files = {}
         self.local_files = {}
@@ -29,7 +28,7 @@ class Scheduler:
         self.logger = logger()
         self.pipeline_out = Queue()
         self.private_key = str
-        self.config_parser = ConfigParser(self.config)
+        self.config_parser = config_parser
         self.hosts = self.config_parser.get_hosts()
         self.result_queue = result_queue
 

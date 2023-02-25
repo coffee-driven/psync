@@ -2,7 +2,6 @@ import logging
 import time
 import re
 
-
 from abc import ABC, abstractmethod
 import hashlib
 from multiprocessing import Queue
