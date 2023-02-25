@@ -1,7 +1,7 @@
 import logging
 import time
 
-from multiprocessing import Process, Queue, Event
+from multiprocessing import Process, Queue
 from queue import Empty
 
 
@@ -10,19 +10,12 @@ from psync.conn import HostConnectionPool
 
 
 def logger():
-    logging.basicConfig(filename="/tmp/test.log", filemode='a')
     logger = logging.getLogger()
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.ERROR)
-
     return logger
 
 
 class Pipeline:
-    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, reload: Event, config_parser) -> None:
+    def __init__(self, data_in: Queue, data_out: Queue, host_id: str, connections: HostConnectionPool, config_parser) -> None:
         Process.__init__(self)
         self.config_parser = config_parser
         self.connections = connections
@@ -30,7 +23,6 @@ class Pipeline:
         self.data_out = data_out
         self.host_id = host_id
         self.logger = logger()
-        self.reload = reload
 
         # Final status output
         self.status = {
@@ -100,11 +92,6 @@ class Pipeline:
         while True:
             self.logger.debug("Pipeline loop")
 
-            if self.reload.is_set():
-                self.logger.info("RELOAD - Pipeline terminating command processes")
-                _ = [q.put([None])for q in queues]
-                return
-
             # Stage files and sizes
             self.logger.debug("Check files and sizes")
             try:
@@ -154,6 +141,7 @@ class Pipeline:
                     self.status["files"][filename]["checksum"] = checksum
 
                     storage = self.config_parser.get_files_local_storage(self.host_id, filename)
+                    print("HERE")
                     download_data = (filename, storage)
 
                     self.logger.debug("putting on dload queue")

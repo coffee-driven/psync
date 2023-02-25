@@ -29,7 +29,7 @@ class ConfigParser:
         return files
 
     def get_files_local_storage(self, host, path):
-        local_storage = str(self.config[host]["files"][path]["local_path"])
+        local_storage = str(self.config[host]["storage"])
         return local_storage
 
     def get_port(self, host):

@@ -2,20 +2,15 @@ import logging
 import time
 import re
 
-from difflib import Differ
-from multiprocessing import Process, Queue
+
+from abc import ABC, abstractmethod
+import hashlib
+from multiprocessing import Queue
 from queue import Empty
 
 
 def logger():
-    logging.basicConfig(filename="/tmp/test.log", filemode='a')
     logger = logging.getLogger()
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.ERROR)
-
     return logger
 
 
@@ -26,9 +21,6 @@ class LocalCommands:
         self.logger = logger()
 
     def get_local_checksum(self):
-
-        import hashlib
-
         self.logger.info("cmd check local file launched")
         files = []
         while True:
@@ -61,12 +53,65 @@ class LocalCommands:
         pass
 
 
+class Strategy(ABC):
+
+    @abstractmethod
+    def command(path: str):
+        pass
+
+
+class FindFile(Strategy):
+    def command(path):
+        cmd = '''find {} -type f -exec du {{}} \\;'''.format(path)
+        return cmd
+
+
+class FindDir(Strategy):
+    def command(self, path):
+        cmd = '''find {} -type f -exec du {{}} \\;'''.format(path)
+        return cmd
+
+
+class GetFileType(Strategy):
+    def command(self, path):
+        cmd = '''file = {}
+                if [ -d ${{file}} ] ; then
+                    printf '%s\n' "directory"
+                 elif [ -f ${{file}} ] ; then
+                    printf '%s\n' "file"
+                 else
+                    printf '%s\n' "missing"
+                 fi
+              '''.format(path)
+        return cmd
+
+
+class FileCommandsContext:
+    def __init__(self, strategy: Strategy, connection, path: str):
+        self.connection = connection
+        self._strategy = strategy
+        self.path = path
+
+    @property
+    def strategy(self) -> Strategy:
+        return self._strategy
+
+    @strategy.setter
+    def strategy(self, strategy: Strategy) -> None:
+        self._strategy = strategy
+
+    def execute(self):
+        try:
+            cmd = self.connection.run(self.strategy.command(self.path))
+        except Exception as e:
+            return (e, [])
+        else:
+            out = cmd.stdout
+            result = out.splitlines()
+            return ("", result)
+
+
 class RemoteCommands:
-    """
-       Remote command object.
-       Data queue is used for control data - sizes, hashes
-       Management queue is used for siginalization
-    """
     def __init__(self, connection, data_in: Queue, data_out: Queue):
         self.connection = connection
         self.data_in = data_in
@@ -81,7 +126,7 @@ class RemoteCommands:
 
         while True:
             try:
-                files = self.data_in.get(block=False, timeout=0.5)
+                files = self.data_in.get(block=False)
             except Empty:
                 continue
             if files[0] is None:
@@ -89,7 +134,7 @@ class RemoteCommands:
                 return
 
             self.logger.debug("received item from queue")
-            
+
             # Batch of files 
             # file_paths = ' '.join(files)
             # shell_cmd = 'md5sum {}'.format(file_paths)
@@ -102,20 +147,20 @@ class RemoteCommands:
                 # md5sum splits the data by two spaces (Debian10)
                 checksum, _filename = re.split("  ", cmd_out)
                 filename = _filename.rstrip('\n')
-                
+
                 self.logger.debug("Checksum gained for %s", filename)
-    
+
                 self.logger.info("cmd calculate file putting on queue")
                 self.data_out.put({filename: checksum})
 
     def get_file(self):
         self.logger.info("cmd get file launched")
         c = self.connection.open_connection()
-        files = ()
 
+        files = ()
         while True:
             try:
-                files = self.data_in.get(block=False, timeout=0.2)
+                files = self.data_in.get(block=False)
             except Empty:
                 continue
 
@@ -133,13 +178,13 @@ class RemoteCommands:
     def remote_sleep(self, sleep_time: int):
         self.logger.info("cmd remote sleep launched")
         c = self.connection.open_connection()
-        
+
         shell_cmd = "sleep {} && echo Up!".format(sleep_time)
         cmd = c.run(shell_cmd)
         cmd_out = cmd.stdout
-        
+
         self.logger.info("cmd remote command putting on queue")
-        self.data_queue.put([out])
+        self.data_queue.put([cmd_out])
 
     @staticmethod
     def parse_files_and_sizes(sizes_and_files: list) -> dict:
@@ -149,21 +194,21 @@ class RemoteCommands:
         """
         res = {}
 
-        separator = '\t' # this might be converted to function that identify the separator
+        separator = '\t'  # this might be converted to function that identify the separator
         for record in sizes_and_files:
             size_file = record.split(separator)
             res[size_file[1]] = int(size_file[0])
-        
+
         return res
 
     def get_files_and_sizes(self) -> dict:
         """Find files, get their size return list sorted by size."""
         self.logger.info("cmd get files and sizes launched")
-        c = self.connection.open_connection()
+        connection = self.connection.open_connection()
 
         while True:
             try:
-                files = self.data_in.get(block=False, timeout=0.3)
+                files = self.data_in.get(block=False)
             except Empty:
                 time.sleep(0.2)
                 continue
@@ -173,51 +218,43 @@ class RemoteCommands:
                     return
 
                 found_files = []
+                present_files = []
                 data = {
                     "found": {},
                     "not_found": {},
                 }
 
-                file_paths = ' '.join(files)
-                self.logger.debug("FILES %s", file_paths)
-                
-                shell_cmd = '''for file in {} ; do
-                           if [ -f $file ] ; then
-                               printf '%s\n' "$(du $file)"
-                           elif [ -d $file ] ; then
-                               find $file -type f -exec du {{}} \;
-                           else
-                               printf '%s' ""
-                           fi
-                          done'''.format(file_paths)
+                for file_path in files:
+                    found_files = []
+                    remote_command = FileCommandsContext(GetFileType(), connection, file_path)
+                    err, file_type = remote_command.execute()
+                    if err:
+                        self.logger.error("Get file type error %s", err)
+                        continue
 
-                try:
-                    cmd = c.run(shell_cmd)
-                except Exception as e:
-                    self.logger.error("file sizes %s", e)
-                else:
-                    cmd_out = cmd.stdout
-                    splitted_result = cmd_out.split('\n')
-                    found_files = [x for x in splitted_result if x != '']
+                    if file_type[0] == "missing":
+                        data["not_found"][file_path] = -1
+                        continue
 
-                if not found_files:
-                    self.logger.warning("Find didn't find any files")
-                    data["not_found"] = files
-                    self.data_out.put(data)
-                    return
-                
-                files_sizes_dict = self.parse_files_and_sizes(found_files)
-                found_filenames = list(files_sizes_dict.keys())
+                    if file_type[0] == "directory":
+                        present_files.append(file_path)
+                        remote_command.strategy = FindDir()
+                        err, found_files = remote_command.execute()
+                        if err:
+                            self.logger.error("Find dir error: %s", err)
+                            continue
 
-                diff = Differ()
-                diff_res = diff.compare(sorted(found_filenames), sorted(files))
-                for line in diff_res:
-                    if line[0] == "+":
-                        name = str(line[2:])
-                        data["not_found"][name] = -1
+                    if file_type[0] == "file":
+                        present_files.append(file_path)
+                        remote_command.strategy(FindFile)
+                        err, found_files = remote_command.execute()
+                        if err:
+                            self.logger.error("Find file error: %s", err)
+                            continue
 
-                sorted_by_size = dict(sorted(files_sizes_dict.items(), key=lambda x: x[1]))
-                data["found"] = sorted_by_size
+                    files_sizes_dict = self.parse_files_and_sizes(found_files)
+                    sorted_by_size = dict(sorted(files_sizes_dict.items(), key=lambda x: x[1]))
+                    data["found"].update(sorted_by_size)
 
                 self.logger.debug("Remote command get files and sizes has finished")
                 self.logger.info("Remote command get files and sizes putting on queue")

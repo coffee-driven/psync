@@ -1,0 +1,14 @@
+{   "vm1": {
+        "host": "127.0.0.1",
+        "port": 2022,
+        "username": "bob",
+        "private_key": "docker/priv",
+        "storage": "/tmp",
+        "connections": 3,
+        "options": "",
+        "files": {
+                "/home/my_dir": {
+                }
+            }
+        }
+}

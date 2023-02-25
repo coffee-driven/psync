@@ -31,6 +31,10 @@
             "/home/testfile2": {
                 "sync_options": "options",
                 "local_path": "/tmp"
+            },
+            "/home/my_dir": {
+                "sync_options": "options" ,
+                "local_path": "/tmp"
             }
         }
     }

@@ -1,6 +1,6 @@
 from fabric import Connection
 from multiprocessing import Process, Queue
-from psync import psync, conn, commands, config_parser as conf_parser
+from psync import conn, commands, config_parser as conf_parser
 
 
 def test_con():
@@ -26,7 +26,7 @@ def test_files_and_sizes_parser():
     test_data = ['99\tmy_file']
     res = commands.RemoteCommands.parse_files_and_sizes(test_data)
     size = res["my_file"]
-    assert size is 99
+    assert size == 99
 
 
 def test_remote_cmd_file_and_sizes():
@@ -113,17 +113,14 @@ def test_get_files_local_path():
             "port": 2022,
             "username": "bob",
             "private_key": "",
-            "default_storage": "/tmp",
+            "storage": "/tmp",
             "connections": 3,
-            "files": {
-                "/home/testfile2": {
-                    "sync_options": "options",
-                    "local_path": "/storage"
-                }, }, }, }
+            "files": {"/home/testfile2"}
+            }}
 
     test_data = "/home/testfile2"
 
     config_parser = conf_parser.ConfigParser(cfg)
     local_store = config_parser.get_files_local_storage("vm2", test_data)
 
-    assert local_store == "/storage"
+    assert local_store == "/tmp"
