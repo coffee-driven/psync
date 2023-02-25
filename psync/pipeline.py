@@ -112,6 +112,7 @@ class Pipeline:
                 download_list = []
                 for filename, size in remote_files_sizes["found"].items():
                     download_list.append(filename)
+
                     self.status["files"][filename] = {}
                     self.status["files"][filename]["size"] = size
 
@@ -141,7 +142,6 @@ class Pipeline:
                     self.status["files"][filename]["checksum"] = checksum
 
                     storage = self.config_parser.get_files_local_storage(self.host_id, filename)
-                    print("HERE")
                     download_data = (filename, storage)
 
                     self.logger.debug("putting on dload queue")
@@ -158,7 +158,6 @@ class Pipeline:
             else:
                 for k, v in dloaded_file.items():
                     local_path = self.config_parser.get_files_local_storage(self.host_id, k)
-                    # local_store = "{}{}".format(local_path, k)
                     data = (k, local_path)
 
                     self.logger.debug("Putting on check queue")
@@ -210,5 +209,4 @@ class Pipeline:
                     self.logger.debug("All queues closed")
                     self.logger.info("%s - Pipeline has finished", self.host_id)
 
-                    return
-                time.sleep(0.2)
+                    return 0

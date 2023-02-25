@@ -115,7 +115,7 @@ def test_get_files_local_path():
             "private_key": "",
             "storage": "/tmp",
             "connections": 3,
-            "files": {"/home/testfile2"}
+            "files": ["/home/testfile2"]
             }}
 
     test_data = "/home/testfile2"
