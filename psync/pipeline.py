@@ -110,8 +110,10 @@ class Pipeline:
 
                 self.logger.debug("Creating download list")
                 download_list = []
+                check_list = []
                 for filename, size in remote_files_sizes["found"].items():
                     download_list.append(filename)
+                    local_files_queue_in.append(filename)
 
                     self.status["files"][filename] = {}
                     self.status["files"][filename]["size"] = size
@@ -126,6 +128,12 @@ class Pipeline:
                                                       }
 
                     self.logger.error("File not found %s", filename)
+
+            # Stage check file locally
+            self.logger.debug("Checking file locally")
+            try:
+                
+            
 
             # Stage remote checksum subprocess
             self.logger.debug("Checking checksum queue")

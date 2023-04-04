@@ -64,10 +64,9 @@ def main():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
                     prog = 'ProgramName',
-                    description = 'What the program does',
+                    description = 'Agent-less file synchronization simultaneously from multiple hosts via SSH and shell commands',
                     epilog = 'Text at the bottom of help')
     parser.add_argument('--config', dest='config', action='store', help='Configuration', required=True)
-    parser.add_argument('--output', dest='output', action='store', help='Record synchronization status into file')
 
     args = parser.parse_args()
 

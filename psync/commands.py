@@ -46,7 +46,7 @@ class LocalCommands:
                     checksum = hasher.hexdigest()
 
                     self.logger.info("cmd get local checksum putting on queue %s", file)
-                    self.data_out.put({remote_path: { "local_path": local_path, "checksum": checksum},},)
+                    self.data_out.put({remote_path: {"local_path": local_path, "checksum": checksum},},)
 
     def get_local_files(self):
         pass
@@ -67,7 +67,7 @@ class FindFile(Strategy):
 
 class FindDir(Strategy):
     def command(self, path):
-        cmd = '''find {} -type f -exec du {{}} \\;'''.format(path)
+        cmd = '''find {} -type d -exec du {{}} \\;'''.format(path)
         return cmd
 
 
@@ -226,6 +226,7 @@ class RemoteCommands:
                 for file_path in files:
                     found_files = []
                     remote_command = FileCommandsContext(GetFileType(), connection, file_path)
+       
                     err, file_type = remote_command.execute()
                     if err:
                         self.logger.error("Get file type error %s", err)
