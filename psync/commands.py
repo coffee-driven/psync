@@ -19,6 +19,14 @@ class LocalCommands:
         self.data_out = data_out
         self.logger = logger()
 
+    def _get_file_hash(self, file, hasher, blocksize=65536):
+        with open(file, 'rb') as bytes:
+            block = bytes.read(blocksize)
+            while len(block) > 0:
+                hasher.update(block)
+                block = bytes.read(blocksize)
+        return hasher.hexdigest()
+
     def get_local_checksum(self):
         self.logger.info("cmd check local file launched")
         files = []
@@ -32,21 +40,14 @@ class LocalCommands:
                     self.logger.info("cmd check local file finished")
                     return
 
-                for file in files:
-                    data = []
-                    hasher = hashlib.md5()
+                remote_local_path = files[0]
+                remote_path, local_storage = remote_local_path[0], remote_local_path[1]
+                local_path = "{}{}".format(local_storage, remote_path)
 
-                    remote_path, local_store = file
-                    local_path = "{}{}".format(local_store, remote_path)
+                checksum = self._get_file_hash(local_path, hashlib.md5())
 
-                    with open(local_path, 'rb') as f:
-                        data = f.readlines()
-
-                    hasher.update(data[0])
-                    checksum = hasher.hexdigest()
-
-                    self.logger.info("cmd get local checksum putting on queue %s", file)
-                    self.data_out.put({remote_path: {"local_path": local_path, "checksum": checksum},},)
+                self.logger.info("cmd get local checksum putting on queue %s", local_path)
+                self.data_out.put({remote_path: {"local_path": local_path, "checksum": checksum},},)
 
     def get_local_files(self):
         pass
@@ -60,7 +61,7 @@ class Strategy(ABC):
 
 
 class FindFile(Strategy):
-    def command(path):
+    def command(self, path):
         cmd = '''find {} -type f -exec du {{}} \\;'''.format(path)
         return cmd
 
@@ -73,10 +74,11 @@ class FindDir(Strategy):
 
 class GetFileType(Strategy):
     def command(self, path):
-        cmd = '''file = {}
-                if [ -d ${{file}} ] ; then
+        cmd = '''file={}
+                echo $file > /tmp/debug
+                if [ -d $file ] ; then
                     printf '%s\n' "directory"
-                 elif [ -f ${{file}} ] ; then
+                 elif [ -f $file ] ; then
                     printf '%s\n' "file"
                  else
                     printf '%s\n' "missing"
@@ -226,7 +228,7 @@ class RemoteCommands:
                 for file_path in files:
                     found_files = []
                     remote_command = FileCommandsContext(GetFileType(), connection, file_path)
-       
+
                     err, file_type = remote_command.execute()
                     if err:
                         self.logger.error("Get file type error %s", err)
@@ -246,8 +248,9 @@ class RemoteCommands:
 
                     if file_type[0] == "file":
                         present_files.append(file_path)
-                        remote_command.strategy(FindFile)
+                        remote_command.strategy = FindFile()
                         err, found_files = remote_command.execute()
+
                         if err:
                             self.logger.error("Find file error: %s", err)
                             continue

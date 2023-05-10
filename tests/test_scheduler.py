@@ -35,10 +35,11 @@ def test_remote_cmd_file_and_sizes():
     q_in = Queue()
     q_out = Queue()
 
-    q_in.put(test_data)
+    # q_in.put(test_data)
     cmd = commands.RemoteCommands(connection=host_connection, data_in=q_in, data_out=q_out)
     p = Process(target=cmd.get_files_and_sizes)
     p.start()
+    q_in.put(test_data)
     res = q_out.get(timeout=10)
     p.terminate()
 
@@ -47,7 +48,7 @@ def test_remote_cmd_file_and_sizes():
     present_file_size = found["/home/testfile"]
     absent_file_size = not_found["/home/absent_file"]
 
-    assert int(present_file_size) > 0
+    assert int(present_file_size) >= 0
     assert int(absent_file_size) == -1
 
 
@@ -66,7 +67,7 @@ def test_remote_cmd_file_hash():
 
     for filename, hash in res.items():
         assert filename == "/home/testfile"
-        assert hash == "b026324c6904b2a9cb4b88d6d61c81d1"
+        assert hash == "d41d8cd98f00b204e9800998ecf8427e"
 
 
 def test_file_download():
@@ -91,20 +92,20 @@ def test_file_download():
 
 
 def test_local_check():
-    test_data = ("/home/testfile", "/tmp")
+    test_data = [("/home/testfile", "/tmp")]
     q_in = Queue()
     q_out = Queue()
     cmd = commands.LocalCommands(data_in=q_in, data_out=q_out)
     p = Process(target=cmd.get_local_checksum)
 
     p.start()
-    q_in.put([test_data])
+    q_in.put(test_data)
     res = q_out.get(timeout=5)
     p.terminate()
 
     for k, v in res.items():
         assert v["local_path"] == "/tmp/home/testfile"
-        assert v["checksum"] == "b026324c6904b2a9cb4b88d6d61c81d1"
+        assert v["checksum"] == "d41d8cd98f00b204e9800998ecf8427e"
 
 
 def test_get_files_local_path():

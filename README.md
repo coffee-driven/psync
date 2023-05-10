@@ -25,3 +25,6 @@ Client requirements:
 The tool employ at least three connections per host, that are used by three parallel processes for filepath resolution and size computation, remote hashing and actual download.  Files are processed from smallest to biggest one by one. 
 
 Parallelization tries to leverage  CPU bound and I/O bound tasks, eq. hashing and transferring.
+
+### NOTES
+Shell commands must be properly tested!
