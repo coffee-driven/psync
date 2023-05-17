@@ -111,15 +111,6 @@ class Pipeline:
                 self.logger.debug("Creating download list")
                 download_list = []
                 check_list = []
-                for filename, size in remote_files_sizes["found"].items():
-                    download_list.append(filename)
-                    local_files_queue_in.append(filename)
-
-                    self.status["files"][filename] = {}
-                    self.status["files"][filename]["size"] = size
-
-                    self.logger.debug("putting on checksum queue %s", filename)
-                    checksum_queue_in.put(download_list)
 
                 for filename, size in remote_files_sizes["not_found"].items():
                     self.status["files"][filename] = {"size": 0,
@@ -129,11 +120,16 @@ class Pipeline:
 
                     self.logger.error("File not found %s", filename)
 
-            # Stage check file locally
-            self.logger.debug("Checking file locally")
-            try:
-                
-            
+                for filename, size in remote_files_sizes["found"].items():
+                    download_list.append(filename)
+                    local_files_queue_in.append(filename)
+
+                    self.status["files"][filename] = {}
+                    self.status["files"][filename]["size"] = size
+
+                    self.logger.debug("putting on checksum queue %s", filename)
+
+                    checksum_queue_in.put(download_list)
 
             # Stage remote checksum subprocess
             self.logger.debug("Checking checksum queue")
@@ -150,14 +146,22 @@ class Pipeline:
                     self.status["files"][filename]["checksum"] = checksum
 
                     storage = self.config_parser.get_files_local_storage(self.host_id, filename)
-                    download_data = (filename, storage)
+                    remote_file_for_sync = (checksum, filename, storage)
 
-                    self.logger.debug("putting on dload queue")
-                    download_queue_in.put([download_data])
+                    self.logger.debug("putting on local check queue")
+                    local_files_queue_in.put(remote_file_for_sync)
 
-            # TODO Filter files that are present and actual, download only missing files
+            # Stage check file presence and state on local storage
+            self.logger.debug("Checking file locally, download only missing files")
+            try:
+                filename_storage = local_check_queue_out.get(block=True, timeout=0.1)
+            except Empty:
+                pass
+            else:
+                self.logger.debug("Processing output from local files queue")
+                download_queue_in.put(filename_storage)
 
-            # Stage download subprocess
+            # Stage download files
             self.logger.debug("Checking dload queue")
             try:
                 dloaded_file = download_queue_out.get(block=True, timeout=0.2)
@@ -171,7 +175,7 @@ class Pipeline:
                     self.logger.debug("Putting on check queue")
                     local_check_queue_in.put([data])
 
-            # Stage local check subprocess
+            # Stage verify checksum after download
             self.logger.debug("Checking final status")
             try:
                 local_check_status = local_check_queue_out.get(block=True, timeout=0.2)

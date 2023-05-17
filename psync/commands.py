@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import re
 
@@ -49,8 +50,30 @@ class LocalCommands:
                 self.logger.info("cmd get local checksum putting on queue %s", local_path)
                 self.data_out.put({remote_path: {"local_path": local_path, "checksum": checksum},},)
 
-    def get_local_files(self):
-        pass
+    def check_file_locally(self):
+        '''Produces download items for files that are missing or desync.'''
+        self.logger.info("cmd check local file launched")
+        file = []
+        while True:
+            try:
+                file = self.data_in.get(block=True, timeout=0.3)
+            except Empty:
+                continue
+            else:
+                if file[0] is None:
+                    self.logger.info("cmd check file locally finished")
+                    return
+                checksum, filename, storage = file[0]
+                local_file_path = '{}/{}'.format(storage, filename)
+
+                if os.path.isfile(local_file_path):
+
+                    local_checksum = self._get_file_hash(local_file_path, hashlib.md5())
+                    if local_checksum == checksum:
+                        self.logger.info("file is present and up to date: %s", filename)
+                        continue
+
+                self.data_out.put([(filename, storage)])
 
 
 class Strategy(ABC):
@@ -122,15 +145,16 @@ class RemoteCommands:
     def calculate_file_hash(self) -> dict:
         """Calculate hash of file"""
         self.logger.info("cmd calculate file hash launched")
-        files = []
+        file = []
         c = self.connection.open_connection()
 
         while True:
             try:
-                files = self.data_in.get(block=False)
+                file = self.data_in.get(block=False)
             except Empty:
                 continue
-            if files[0] is None:
+
+            if file[0] is None:
                 self.logger.info("cmd calculate file hash been terminated")
                 return
 
@@ -140,41 +164,45 @@ class RemoteCommands:
             # file_paths = ' '.join(files)
             # shell_cmd = 'md5sum {}'.format(file_paths)
 
-            for file in files:
-                shell_cmd = 'md5sum {}'.format(file)
-                cmd = c.run(shell_cmd)
-                cmd_out = cmd.stdout
+            shell_cmd = 'md5sum {}'.format(file[0])
 
-                # md5sum splits the data by two spaces (Debian10)
-                checksum, _filename = re.split("  ", cmd_out)
-                filename = _filename.rstrip('\n')
+            cmd = c.run(shell_cmd)
+            cmd_out = cmd.stdout
 
-                self.logger.debug("Checksum gained for %s", filename)
+            # md5sum splits the data by two spaces (Debian10)
+            checksum, _filename = re.split("  ", cmd_out)
+            filename = _filename.rstrip('\n')
 
-                self.logger.info("cmd calculate file putting on queue")
-                self.data_out.put({filename: checksum})
+            self.logger.debug("Checksum gained for %s", filename)
+            self.logger.info("cmd calculate file putting on queue")
+
+            self.data_out.put({filename: checksum})
 
     def get_file(self):
         self.logger.info("cmd get file launched")
         c = self.connection.open_connection()
 
-        files = ()
+        file = []
         while True:
             try:
-                files = self.data_in.get(block=False)
+                file = self.data_in.get(block=False)
             except Empty:
                 continue
 
-            if files[0] is None:
+            if file[0] is None:
                 self.logger.info("cmd get file finished")
                 return
 
-            for file in files:
-                remote_path, local_path = file
-                local_store = "{}/{}".format(local_path, remote_path)
+            remote_path, local_path = file[0]
+            local_store = "{}/{}".format(local_path, remote_path)
+            self.logger.info("cmd get file downloading file %s to %s", remote_path, local_path)
+            try:
                 c.get(remote_path, local_store, False)
-                self.logger.info("cmd get file downloading file %s to %s", remote_path, local_path)
-                self.data_out.put({remote_path: True})
+            except Exception as e:
+                self.logger.warn("cmd get file failed for file %s with error %s", remote_path, e)
+                self.data_out.put([(remote_path, False)])
+            else:
+                self.data_out.put([(remote_path, True)])
 
     def remote_sleep(self, sleep_time: int):
         self.logger.info("cmd remote sleep launched")
