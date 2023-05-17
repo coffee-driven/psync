@@ -139,9 +139,7 @@ class Pipeline:
                 pass
             else:
                 self.logger.debug("Processing output from checksum queue")
-                for k, v in filename_checksum.items():
-                    filename = k
-                    checksum = v
+                for filename, checksum in filename_checksum.items():
 
                     self.status["files"][filename]["checksum"] = checksum
 
